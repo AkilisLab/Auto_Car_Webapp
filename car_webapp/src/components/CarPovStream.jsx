@@ -3,7 +3,11 @@ import { Card } from "./ui/card";
 import { Compass } from "lucide-react";
 import { motion } from "framer-motion";
 
-export default function CarPovStream({ status }) {
+export default function CarPovStream({ status = {} }) {
+  const pwm = typeof status.pwm !== "undefined" ? status.pwm : 0;
+  const steering = typeof status.steering !== "undefined" ? status.steering : 0;
+  const steeringDeg = Math.round(steering * 45); // same mapping used elsewhere
+
   // A modern, clean car interior view for the stream background
   const imageUrl = "https://images.unsplash.com/photo-1616455579107-5337aDEb5b63?q=80&w=2070&auto=format&fit=crop";
 
@@ -31,24 +35,20 @@ export default function CarPovStream({ status }) {
               <Compass className="w-4 h-4 text-blue-400" />
               <span className="font-mono">{status?.location || "N/A"}</span>
             </div>
-            <div className="text-xs text-slate-400">Heading: North</div>
+            <div className="text-xs text-slate-400">Steering: {steeringDeg}°</div>
           </div>
         </div>
 
-        {/* Bottom Overlay - Speedometer */}
+        {/* Bottom Overlay - PWM display (static, no animation) */}
         <div className="flex justify-center items-end">
           <div className="text-center text-white">
-            <motion.div
-              key={status?.speed || 0}
-              initial={{ opacity: 0.5, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.2 }}
+            <div
               className="text-7xl md:text-8xl font-mono font-bold"
-              style={{ textShadow: '0 0 15px rgba(0, 212, 255, 0.7)' }}
+              style={{ /* removed animation for clear presentation */ }}
             >
-              {status?.speed || 0}
-            </motion.div>
-            <div className="text-lg text-slate-300 -mt-2">MPH</div>
+              {pwm}
+            </div>
+            <div className="text-lg text-slate-300 -mt-2">PWM</div>
           </div>
         </div>
       </div>

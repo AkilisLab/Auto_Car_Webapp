@@ -11,99 +11,119 @@ export default function Layout({ children }) {
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+    <div className="app-root">
       <style>
         {`
+          /* base */
           :root {
-            --electric-blue: #00D4FF;
-            --neon-green: #00FF88;
-            --dark-slate: #0F172A;
-            --medium-slate: #1E293B;
-            --light-slate: #334155;
+            --bg-1: #06121a;
+            --bg-2: #0b1624;
+            --card: rgba(30,41,59,0.7);
+            --muted: #98a0b3;
+            --accent: #2fb7ff;
+            --green: #00ff88;
+            --glass-border: rgba(255,255,255,0.04);
           }
-          
-          .glow-blue {
-            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+          html,body,#root { height:100%; margin:0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color:#e6eef8; background: linear-gradient(180deg,var(--bg-1), var(--bg-2)); }
+
+          /* header */
+          .topbar {
+            backdrop-filter: blur(8px);
+            background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+            border-bottom: 1px solid var(--glass-border);
+            padding: 12px 20px;
+            position: sticky;
+            top:0;
+            z-index:50;
           }
-          
-          .glow-green {
-            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+          .topbar-inner { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+
+          .brand { display:flex; align-items:center; gap:12px; text-decoration:none; color:inherit; }
+          .brand-badge { width:44px;height:44px;border-radius:10px; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#2f9bff,#3be1d0); box-shadow:0 4px 18px rgba(47,155,255,0.16); }
+          .brand h1 { margin:0; font-size:16px; font-weight:700; color:#fff; }
+          .brand p { margin:0; font-size:12px; color:var(--muted); }
+
+          /* nav */
+          .topnav { display:flex; gap:8px; align-items:center; }
+          .topnav a { text-decoration:none; color:var(--muted); }
+          .nav-link {
+            display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:10px;
+            transition: background .12s, color .12s;
+            color:var(--muted);
           }
-          
-          .text-glow {
-            text-shadow: 0 0 10px currentColor;
+          .nav-link:hover { background: rgba(255,255,255,0.03); color:#fff; }
+          .nav-link.active { background: rgba(255,255,255,0.06); color:#fff; box-shadow: 0 4px 22px rgba(0,0,0,0.35); }
+
+          /* status */
+          .status { display:flex; gap:14px; align-items:center; color:var(--muted); }
+          .status .ok { color: #2bd76a; display:flex; gap:8px; align-items:center; }
+
+          /* main container - centers pages (hero) */
+          .main { flex:1 1 auto; padding:48px 20px; }
+          .container { max-width:1200px; margin:0 auto; }
+
+          /* basic hero styles (so Home.jsx markup looks correct) */
+          .hero { text-align:center; padding:64px 20px 96px; }
+          .hero .hero-badge { width:84px;height:84px;margin:0 auto 18px;border-radius:14px;background:linear-gradient(135deg,#39aaff,#3be1d0); display:flex; align-items:center; justify-content:center; box-shadow:0 10px 40px rgba(0,0,0,0.45); }
+          .hero h1 { font-size:56px; line-height:1; margin:0 0 14px; color:#fff; font-weight:800; letter-spacing:-1px; }
+          .hero p { color:var(--muted); font-size:16px; margin:0 0 28px; max-width:720px; margin-left:auto; margin-right:auto; }
+
+          .btn-primary {
+            display:inline-flex; align-items:center; gap:10px; padding:12px 26px; border-radius:999px;
+            background:linear-gradient(90deg,#1678ff,#5bd2ff); color:#fff; border:none; cursor:pointer;
+            box-shadow: 0 8px 28px rgba(24,119,255,0.18), inset 0 -3px 8px rgba(0,0,0,0.12);
+            font-weight:600;
           }
-          
-          .glass-effect {
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-          }
-          
-          @keyframes pulse-glow {
-            0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
-            50% { box-shadow: 0 0 30px rgba(0, 212, 255, 0.6); }
-          }
-          
-          .pulse-glow {
-            animation: pulse-glow 2s infinite;
+
+          /* footer */
+          .footer { border-top:1px solid var(--glass-border); padding:14px 20px; color:var(--muted); text-align:center; }
+          /* responsive tweaks */
+          @media (max-width:768px) {
+            .topnav { display:none; }
+            .hero h1 { font-size:36px; }
           }
         `}
       </style>
-      
-      {/* Top Status Bar */}
-      <header className="glass-effect border-b border-slate-700/50 px-4 py-3 sticky top-0 z-50">
-        <div className="flex items-center justify-between max-w-7xl mx-auto">
-          <Link to="/" className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-cyan-400 rounded-lg flex items-center justify-center glow-blue">
-              <Car className="w-6 h-6 text-white" />
-            </div>
+
+      <header className="topbar">
+        <div className="topbar-inner">
+          <Link to="/" className="brand" aria-label="AutoDrive Home">
+            <div className="brand-badge"><Car className="icon" /></div>
             <div>
-              <h1 className="text-white font-bold text-lg">AutoDrive</h1>
-              <p className="text-slate-400 text-xs">Autonomous Control System</p>
+              <h1>AutoDrive</h1>
+              <p>Autonomous Control System</p>
             </div>
           </Link>
-          
-          {/* Navigation Links */}
-          <nav className="hidden md:flex items-center gap-2">
+
+          <nav className="topnav" role="navigation" aria-label="Main navigation">
             {navItems.map((item) => {
               const isActive = location.pathname === item.path;
+              const Icon = item.icon;
               return (
-                <Link key={item.name} to={item.path}>
-                  <div className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                    isActive
-                      ? 'bg-slate-700/80 text-white'
-                      : 'text-slate-400 hover:bg-slate-700/50 hover:text-white'
-                  }`}>
-                    <item.icon className="w-4 h-4" />
-                    <span className="text-sm font-medium">{item.name}</span>
-                  </div>
+                <Link key={item.name} to={item.path} className={`nav-link ${isActive ? "active" : ""}`}>
+                  <Icon className="icon" />
+                  <span style={{fontSize:13, fontWeight:600}}>{item.name}</span>
                 </Link>
               );
             })}
           </nav>
-          
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-green-400">
-              <Zap className="w-4 h-4" />
-              <span className="text-sm font-medium hidden md:block">Connected</span>
-            </div>
-            <div className="flex items-center gap-2 text-blue-400">
-              <Shield className="w-4 h-4" />
-              <span className="text-sm font-medium hidden md:block">Secure</span>
-            </div>
+
+          <div className="status" aria-hidden>
+            <div className="ok"><Zap className="icon" /> <span className="status-text">Connected</span></div>
+            <div><Shield className="icon" /> <span className="status-text">Secure</span></div>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="relative flex-grow">
-        {children}
+      <main className="main">
+        <div className="container">
+          {/* wrap children so Home hero centers and spacing matches design */}
+          {children}
+        </div>
       </main>
 
-      {/* Footer */}
-      <footer className="glass-effect border-t border-slate-700/50 px-4 py-3 mt-auto">
-        <div className="text-center text-slate-500 text-xs max-w-7xl mx-auto">
+      <footer className="footer">
+        <div className="container">
           <p>© 2024 AutoDrive System • Advanced Autonomous Vehicle Control</p>
         </div>
       </footer>
