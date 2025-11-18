@@ -2,6 +2,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
+import time
 from typing import Dict, Any
 
 app = FastAPI(title="WebSocket Demo Server")
@@ -40,7 +41,7 @@ class ConnectionManager:
                 "ws": websocket,
                 "role": role,
                 "meta": meta or {},
-                "last_seen": asyncio.get_event_loop().time(),
+                "last_seen": time.time(),
             }
 
     async def disconnect(self, websocket: WebSocket):
@@ -56,6 +57,15 @@ class ConnectionManager:
     async def broadcast_to_frontends(self, payload: dict):
         async with self.lock:
             conns = [info["ws"] for info in self.devices.values() if info.get("role") == "frontend"]
+        for ws in conns:
+            try:
+                await self.send_json(payload, ws)
+            except Exception:
+                await self.disconnect(ws)
+
+    async def broadcast_to_pis(self, payload: dict):
+        async with self.lock:
+            conns = [info["ws"] for info in self.devices.values() if info.get("role") == "pi"]
         for ws in conns:
             try:
                 await self.send_json(payload, ws)
@@ -106,6 +116,28 @@ async def devices():
     return {"devices": await manager.list_devices()}
 
 
+@app.post("/control")
+async def http_control(request: Request):
+    """Send control commands via HTTP for testing"""
+    body = await request.json()
+    target = body.get("target", "all")
+    payload = body.get("payload", {})
+    envelope = {
+        "from": "http-client",
+        "action": "control", 
+        "type": "manual_drive",
+        "payload": payload,
+        "ts": time.time()
+    }
+    if target == "all":
+        await manager.broadcast_to_pis(envelope)
+    else:
+        ok = await manager.send_to_device(target, envelope)
+        if not ok:
+            raise HTTPException(status_code=404, detail="target not found")
+    return {"status": "sent", "target": target}
+
+
 @app.post("/broadcast")
 async def broadcast(request: Request):
     """
@@ -126,6 +158,9 @@ async def websocket_endpoint(websocket: WebSocket):
       - Pi sends camera frames:
           {"role":"pi","device_id":"pi-01","action":"telemetry","type":"camera_frame",
             "payload":{"frame_b64":"...","width":...,"height":...,"encoding":"jpeg"}, "ts":...}
+      - Frontend sends manual controls:
+          {"role":"frontend","device_id":"web-1","action":"control","type":"manual_drive",
+            "payload":{"speed":0.5,"angle":-0.2}, "target":"pi-01"}
       - Server forwards camera_frame telemetry to all frontends as JSON:
           {"from":"pi-01","action":"telemetry","type":"camera_frame","payload":{...},"ts":...}
     """
@@ -165,7 +200,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # update last_seen/meta
             async with manager.lock:
                 if src in manager.devices:
-                    manager.devices[src]["last_seen"] = asyncio.get_event_loop().time()
+                    manager.devices[src]["last_seen"] = time.time()
                     if payload:
                         manager.devices[src]["meta"].update({"last_payload": payload})
 
@@ -173,8 +208,28 @@ async def websocket_endpoint(websocket: WebSocket):
             if act == "telemetry" and ptype == "camera_frame" and role == "pi":
                 out = {"from": src, "action": "telemetry", "type": "camera_frame", "payload": payload, "ts": ts}
                 await manager.broadcast_to_frontends(out)
+                continue
+
+            # Frontend control messages -> route to target pi(s)
+            elif act == "control" and role == "frontend":
+                target = packet.get("target") or payload.get("target")
+                envelope = {"from": src, "action": "control", "type": ptype, "payload": payload, "ts": ts}
+                if target == "all" or payload.get("broadcast", False):
+                    await manager.broadcast_to_pis(envelope)
+                    await manager.send_json({"status": "sent", "target": "all"}, websocket)
+                elif target:
+                    ok = await manager.send_to_device(target, envelope)
+                    if not ok:
+                        await manager.send_json({"error": "target offline", "target": target}, websocket)
+                    else:
+                        await manager.send_json({"status": "sent", "target": target}, websocket)
+                else:
+                    await manager.send_json({"error": "missing target for control message"}, websocket)
+                continue
+
+            # All other messages
             else:
-                # forward other pi telemetry to frontends; ignore frontend messages in this minimal change
+                # forward other pi telemetry to frontends; echo frontend messages
                 if role == "pi":
                     out = {"from": src, "action": act, "type": ptype, "payload": payload, "ts": ts}
                     await manager.broadcast_to_frontends(out)

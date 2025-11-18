@@ -149,6 +149,67 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   const [route, setRoute] = useState("");
   const [routeActive, setRouteActive] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
+  const [ws, setWs] = useState(null);
+
+  // WebSocket connection setup
+  useEffect(() => {
+    const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
+    const websocket = new WebSocket(wsUrl);
+
+    websocket.addEventListener("open", () => {
+      console.log("ControlPanel WebSocket connected");
+      // handshake as frontend
+      const hs = { 
+        role: "frontend", 
+        device_id: `control-${Math.floor(Math.random()*10000)}`, 
+        action: "handshake", 
+        payload: {} 
+      };
+      websocket.send(JSON.stringify(hs));
+      setWs(websocket);
+    });
+
+    websocket.addEventListener("message", (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        console.log("ControlPanel received:", msg);
+        // Handle responses from Pi (acknowledgments, etc.)
+        if (msg.action === "telemetry" && msg.type === "control_ack") {
+          console.log("Control acknowledged by Pi:", msg.payload);
+        }
+      } catch (e) {
+        // ignore malformed messages
+      }
+    });
+
+    websocket.addEventListener("close", () => {
+      console.log("ControlPanel WebSocket disconnected");
+      setWs(null);
+    });
+
+    return () => {
+      websocket.close();
+    };
+  }, []);
+
+  // Send control messages when joystick values change
+  useEffect(() => {
+    if (ws && ws.readyState === WebSocket.OPEN && mode === "manual") {
+      const controlMsg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "manual_drive",
+        target: "pi-01", // TODO: make this configurable
+        payload: { 
+          speed: accel, 
+          angle: steer 
+        },
+        ts: Date.now() / 1000
+      };
+      ws.send(JSON.stringify(controlMsg));
+    }
+  }, [accel, steer, ws, mode]);
 
   useEffect(() => {
     onStatusUpdate && onStatusUpdate({ ...vehicleStatus, temperature: temp });
@@ -163,6 +224,20 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   }, [accel, steer]);
 
   function handleEmergency() {
+    // Send emergency stop via WebSocket
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const emergencyMsg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "emergency_stop",
+        target: "all", // send to all Pi devices
+        payload: {},
+        ts: Date.now() / 1000
+      };
+      ws.send(JSON.stringify(emergencyMsg));
+    }
+
     onStatusUpdate && onStatusUpdate({ ...vehicleStatus, emergency: true, speed: 0 });
     document.body.style.backgroundColor = "#2b0505";
     setTimeout(() => (document.body.style.backgroundColor = ""), 220);
