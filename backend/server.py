@@ -20,7 +20,7 @@ class ConnectionManager:
     Manage connections and route camera frames (telemetry) from pis -> frontends.
     """
     def __init__(self):
-        # device_id -> {"ws": WebSocket, "role": str, "meta": dict, "last_seen": float}
+        # device_id -> {"ws": WebSocket, "role": str, "meta": dict, "last_seen": float, "emergency": bool}
         self.devices: Dict[str, Dict[str, Any]] = {}
         self.unregistered: set[WebSocket] = set()
         self.lock = asyncio.Lock()
@@ -42,6 +42,7 @@ class ConnectionManager:
                 "role": role,
                 "meta": meta or {},
                 "last_seen": time.time(),
+                "emergency": False,
             }
 
     async def disconnect(self, websocket: WebSocket):
@@ -72,15 +73,25 @@ class ConnectionManager:
             except Exception:
                 await self.disconnect(ws)
 
-    async def broadcast_json(self, payload: dict):
-        # broadcast to all connected websockets
+    async def emergency_broadcast_to_pis(self, payload: dict):
+        """HIGH PRIORITY emergency broadcast - ensures all Pi devices get the message"""
         async with self.lock:
-            conns = [info["ws"] for info in self.devices.values()]
-        for ws in conns:
+            pi_devices = [(did, info) for did, info in self.devices.items() if info.get("role") == "pi"]
+            
+        # Send to all Pi devices and track which ones receive it
+        success_count = 0
+        for device_id, info in pi_devices:
             try:
-                await self.send_json(payload, ws)
+                await self.send_json(payload, info["ws"])
+                # Mark device as in emergency state
+                async with self.lock:
+                    if device_id in self.devices:
+                        self.devices[device_id]["emergency"] = True
+                success_count += 1
             except Exception:
-                await self.disconnect(ws)
+                await self.disconnect(info["ws"])
+        
+        return success_count, len(pi_devices)
 
     async def send_to_device(self, device_id: str, payload: dict) -> bool:
         async with self.lock:
@@ -95,12 +106,38 @@ class ConnectionManager:
             await self.disconnect(ws)
             return False
 
+    async def broadcast_json(self, payload: dict):
+        # broadcast to all connected websockets
+        async with self.lock:
+            conns = [info["ws"] for info in self.devices.values()]
+        for ws in conns:
+            try:
+                await self.send_json(payload, ws)
+            except Exception:
+                await self.disconnect(ws)
+
     async def list_devices(self):
         async with self.lock:
             return [
-                {"device_id": did, "role": info["role"], "meta": info["meta"], "last_seen": info["last_seen"]}
+                {
+                    "device_id": did, 
+                    "role": info["role"], 
+                    "meta": info["meta"], 
+                    "last_seen": info["last_seen"],
+                    "emergency": info.get("emergency", False)
+                }
                 for did, info in self.devices.items()
             ]
+
+    async def clear_emergency_status(self, device_id: str = None):
+        """Clear emergency status for specific device or all devices"""
+        async with self.lock:
+            if device_id:
+                if device_id in self.devices:
+                    self.devices[device_id]["emergency"] = False
+            else:
+                for info in self.devices.values():
+                    info["emergency"] = False
 
 
 manager = ConnectionManager()
@@ -122,13 +159,26 @@ async def http_control(request: Request):
     body = await request.json()
     target = body.get("target", "all")
     payload = body.get("payload", {})
+    control_type = body.get("type", "manual_drive")
+    
     envelope = {
         "from": "http-client",
         "action": "control", 
-        "type": "manual_drive",
+        "type": control_type,
         "payload": payload,
         "ts": time.time()
     }
+    
+    # Special handling for emergency stops
+    if control_type == "emergency_stop":
+        success_count, total_count = await manager.emergency_broadcast_to_pis(envelope)
+        await manager.broadcast_to_frontends({
+            "action": "emergency_broadcast",
+            "payload": {"sent_to": success_count, "total_devices": total_count},
+            "ts": time.time()
+        })
+        return {"status": "emergency_sent", "devices_reached": success_count, "total_devices": total_count}
+    
     if target == "all":
         await manager.broadcast_to_pis(envelope)
     else:
@@ -136,6 +186,23 @@ async def http_control(request: Request):
         if not ok:
             raise HTTPException(status_code=404, detail="target not found")
     return {"status": "sent", "target": target}
+
+
+@app.post("/clear_emergency")
+async def clear_emergency(request: Request):
+    """Clear emergency status for all or specific devices"""
+    body = await request.json()
+    device_id = body.get("device_id")  # None = clear all
+    await manager.clear_emergency_status(device_id)
+    
+    # Notify frontends
+    await manager.broadcast_to_frontends({
+        "action": "emergency_cleared",
+        "device_id": device_id,
+        "ts": time.time()
+    })
+    
+    return {"status": "emergency_cleared", "device_id": device_id or "all"}
 
 
 @app.post("/broadcast")
@@ -161,8 +228,7 @@ async def websocket_endpoint(websocket: WebSocket):
       - Frontend sends manual controls:
           {"role":"frontend","device_id":"web-1","action":"control","type":"manual_drive",
             "payload":{"speed":0.5,"angle":-0.2}, "target":"pi-01"}
-      - Server forwards camera_frame telemetry to all frontends as JSON:
-          {"from":"pi-01","action":"telemetry","type":"camera_frame","payload":{...},"ts":...}
+      - Emergency stops get highest priority routing to all Pi devices
     """
     await manager.connect(websocket)
     device_id = None
@@ -210,10 +276,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_frontends(out)
                 continue
 
+            # Pi emergency acknowledgments -> forward to frontends and clear emergency status
+            elif act == "telemetry" and ptype == "emergency_ack" and role == "pi":
+                out = {"from": src, "action": "telemetry", "type": "emergency_ack", "payload": payload, "ts": ts}
+                await manager.broadcast_to_frontends(out)
+                # Clear emergency status for this device
+                await manager.clear_emergency_status(src)
+                continue
+
+            # Pi emergency cleared acknowledgments -> forward to frontends
+            elif act == "telemetry" and ptype == "emergency_cleared_ack" and role == "pi":
+                out = {"from": src, "action": "telemetry", "type": "emergency_cleared_ack", "payload": payload, "ts": ts}
+                await manager.broadcast_to_frontends(out)
+                continue
+
             # Frontend control messages -> route to target pi(s)
             elif act == "control" and role == "frontend":
                 target = packet.get("target") or payload.get("target")
                 envelope = {"from": src, "action": "control", "type": ptype, "payload": payload, "ts": ts}
+                
+                # EMERGENCY STOP - highest priority, broadcast to ALL Pi devices
+                if ptype == "emergency_stop":
+                    success_count, total_count = await manager.emergency_broadcast_to_pis(envelope)
+                    # Immediate feedback to frontend
+                    await manager.send_json({
+                        "status": "emergency_sent", 
+                        "devices_reached": success_count, 
+                        "total_devices": total_count,
+                        "ts": time.time()
+                    }, websocket)
+                    # Notify all frontends about emergency broadcast
+                    await manager.broadcast_to_frontends({
+                        "action": "emergency_broadcast",
+                        "from": src,
+                        "payload": {"sent_to": success_count, "total_devices": total_count},
+                        "ts": time.time()
+                    })
+                    continue
+                
+                # Regular control messages (including clear_emergency)
                 if target == "all" or payload.get("broadcast", False):
                     await manager.broadcast_to_pis(envelope)
                     await manager.send_json({"status": "sent", "target": "all"}, websocket)

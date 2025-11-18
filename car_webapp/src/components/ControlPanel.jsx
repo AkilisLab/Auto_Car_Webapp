@@ -5,16 +5,7 @@ import Slider from "./ui/slider";
 import Input from "./ui/input";
 import Badge from "./ui/badge";
 
-/**
- * ControlPanel - renders three mode-specific UIs:
- *  - manual  -> two joysticks + temperature slider + red emergency stop
- *  - auto    -> autonomous route UI (destination, start/stop, settings)
- *  - audio   -> voice control UI (talk / mute, quick commands, voice settings)
- *
- * Keeps styles self-contained so it matches screenshots without depending on external CSS.
- */
-
-function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay }) {
+function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay, disabled = false }) {
   const boxRef = useRef();
   const knobRef = useRef();
   const [pos, setPos] = useState({ x: 0, y: 0 });
@@ -24,6 +15,8 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
   }
 
   function pointerMove(e) {
+    if (disabled) return;
+    
     const rect = boxRef.current.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
@@ -50,6 +43,8 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
   }
 
   function startDrag(e) {
+    if (disabled) return;
+    
     e.preventDefault();
     const move = (ev) => pointerMove(ev);
     const up = () => {
@@ -64,7 +59,7 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
 
   return (
     <div style={{ textAlign: "center" }}>
-      <div style={{ color: "#c9d6e6", fontWeight: 700, marginBottom: 8 }}>{label}</div>
+      <div style={{ color: disabled ? "#666" : "#c9d6e6", fontWeight: 700, marginBottom: 8 }}>{label}</div>
       <div
         ref={boxRef}
         onPointerDown={startDrag}
@@ -73,14 +68,18 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
           width: size,
           height: size,
           borderRadius: "50%",
-          border: "2px solid rgba(255,255,255,0.06)",
+          border: `2px solid ${disabled ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.06)"}`,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          background: "radial-gradient(closest-side, rgba(255,255,255,0.01), rgba(0,0,0,0.4))",
+          background: disabled 
+            ? "radial-gradient(closest-side, rgba(0,0,0,0.3), rgba(0,0,0,0.6))"
+            : "radial-gradient(closest-side, rgba(255,255,255,0.01), rgba(0,0,0,0.4))",
+          opacity: disabled ? 0.4 : 1,
+          cursor: disabled ? "not-allowed" : "grab",
         }}
-        aria-label={`${label} joystick`}
+        aria-label={`${label} joystick ${disabled ? "(disabled)" : ""}`}
       >
         <div
           style={{
@@ -88,7 +87,7 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
             width: size - 36,
             height: size - 36,
             borderRadius: "50%",
-            border: "1px solid rgba(255,255,255,0.03)",
+            border: `1px solid ${disabled ? "rgba(255,255,255,0.01)" : "rgba(255,255,255,0.03)"}`,
           }}
         />
         <div
@@ -99,21 +98,31 @@ function Joystick({ size = 160, onChange, axis = "vertical", label, valueDisplay
             width: 28,
             height: 28,
             borderRadius: 999,
-            background: axis === "vertical" ? "linear-gradient(180deg,#2f9bff,#3be1d0)" : "linear-gradient(180deg,#2be1a6,#33c5ff)",
-            boxShadow: "0 6px 18px rgba(0,0,0,0.5), 0 0 10px rgba(0,0,0,0.15) inset",
+            background: disabled 
+              ? "linear-gradient(180deg, #444, #333)"
+              : axis === "vertical" 
+                ? "linear-gradient(180deg,#2f9bff,#3be1d0)" 
+                : "linear-gradient(180deg,#2be1a6,#33c5ff)",
+            boxShadow: disabled 
+              ? "0 2px 6px rgba(0,0,0,0.3)"
+              : "0 6px 18px rgba(0,0,0,0.5), 0 0 10px rgba(0,0,0,0.15) inset",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            cursor: "grab",
+            cursor: disabled ? "not-allowed" : "grab",
           }}
         />
       </div>
-      <div style={{ marginTop: 10, color: "#9fb0c2", fontSize: 13 }}>{valueDisplay}</div>
+      <div style={{ marginTop: 10, color: disabled ? "#666" : "#9fb0c2", fontSize: 13 }}>{valueDisplay}</div>
+      {disabled && (
+        <div style={{ marginTop: 4, color: "#ff6b6b", fontSize: 12, fontWeight: 600 }}>
+          🚨 EMERGENCY MODE
+        </div>
+      )}
     </div>
   );
 }
 
-/* Small quick-command button with press effect */
 function QuickCommandButton({ children, onClick }) {
   const [pressed, setPressed] = useState(false);
   return (
@@ -150,6 +159,13 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   const [routeActive, setRouteActive] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
   const [ws, setWs] = useState(null);
+  const [emergencyStatus, setEmergencyStatus] = useState({
+    active: false,
+    devicesReached: 0,
+    totalDevices: 0,
+    ackReceived: [],
+    timestamp: null
+  });
 
   // WebSocket connection setup
   useEffect(() => {
@@ -173,10 +189,60 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       try {
         const msg = JSON.parse(evt.data);
         console.log("ControlPanel received:", msg);
-        // Handle responses from Pi (acknowledgments, etc.)
+        
+        // Handle emergency responses
+        if (msg.status === "emergency_sent") {
+          setEmergencyStatus(prev => ({
+            ...prev,
+            active: true,
+            devicesReached: msg.devices_reached,
+            totalDevices: msg.total_devices,
+            timestamp: Date.now()
+          }));
+        }
+        
+        // Handle emergency acknowledgments from Pi devices
+        if (msg.action === "telemetry" && msg.type === "emergency_ack") {
+          setEmergencyStatus(prev => ({
+            ...prev,
+            ackReceived: [...prev.ackReceived, msg.from]
+          }));
+          console.log(`Emergency acknowledged by ${msg.from}:`, msg.payload);
+        }
+        
+        // Handle control acknowledgments
         if (msg.action === "telemetry" && msg.type === "control_ack") {
           console.log("Control acknowledged by Pi:", msg.payload);
+          if (msg.payload.emergency_active) {
+            setEmergencyStatus(prev => ({...prev, active: true}));
+          }
         }
+        
+        // Handle emergency cleared notifications
+        if (msg.action === "emergency_cleared") {
+          setEmergencyStatus({
+            active: false,
+            devicesReached: 0,
+            totalDevices: 0,
+            ackReceived: [],
+            timestamp: null
+          });
+          console.log("Emergency status cleared");
+        }
+        
+        // Handle emergency cleared acknowledgments from Pi devices
+        if (msg.action === "telemetry" && msg.type === "emergency_cleared_ack") {
+          setEmergencyStatus(prev => ({
+            ...prev,
+            active: false,
+            ackReceived: [],
+            devicesReached: 0,
+            totalDevices: 0,
+            timestamp: null
+          }));
+          console.log(`Emergency cleared and acknowledged by ${msg.from}:`, msg.payload);
+        }
+        
       } catch (e) {
         // ignore malformed messages
       }
@@ -192,9 +258,9 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     };
   }, []);
 
-  // Send control messages when joystick values change
+  // Send control messages when joystick values change (blocked during emergency)
   useEffect(() => {
-    if (ws && ws.readyState === WebSocket.OPEN && mode === "manual") {
+    if (ws && ws.readyState === WebSocket.OPEN && mode === "manual" && !emergencyStatus.active) {
       const controlMsg = {
         role: "frontend",
         device_id: "control-panel",
@@ -209,7 +275,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       };
       ws.send(JSON.stringify(controlMsg));
     }
-  }, [accel, steer, ws, mode]);
+  }, [accel, steer, ws, mode, emergencyStatus.active]);
 
   useEffect(() => {
     onStatusUpdate && onStatusUpdate({ ...vehicleStatus, temperature: temp });
@@ -218,10 +284,16 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
   // send pwm & accel/steer updates merged into vehicleStatus whenever accel or steer changes
   useEffect(() => {
-    const pwm = Math.round(Math.abs(accel) * 255); // 0-255 magnitude
-    onStatusUpdate && onStatusUpdate({ ...vehicleStatus, acceleration: accel, steering: steer, pwm });
+    const pwm = emergencyStatus.active ? 0 : Math.round(Math.abs(accel) * 255); // 0 during emergency
+    onStatusUpdate && onStatusUpdate({ 
+      ...vehicleStatus, 
+      acceleration: emergencyStatus.active ? 0 : accel, 
+      steering: emergencyStatus.active ? 0 : steer, 
+      pwm,
+      emergency: emergencyStatus.active
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accel, steer]);
+  }, [accel, steer, emergencyStatus.active]);
 
   function handleEmergency() {
     // Send emergency stop via WebSocket
@@ -232,15 +304,51 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         action: "control",
         type: "emergency_stop",
         target: "all", // send to all Pi devices
-        payload: {},
+        payload: {
+          reason: "user_button",
+          source: "control_panel"
+        },
         ts: Date.now() / 1000
       };
       ws.send(JSON.stringify(emergencyMsg));
     }
 
-    onStatusUpdate && onStatusUpdate({ ...vehicleStatus, emergency: true, speed: 0 });
+    // Immediate local feedback
+    setAccel(0);
+    setSteer(0);
+    setEmergencyStatus(prev => ({
+      ...prev,
+      active: true,
+      timestamp: Date.now()
+    }));
+    
+    onStatusUpdate && onStatusUpdate({ 
+      ...vehicleStatus, 
+      emergency: true, 
+      speed: 0, 
+      acceleration: 0, 
+      steering: 0, 
+      pwm: 0 
+    });
+    
+    // Visual feedback
     document.body.style.backgroundColor = "#2b0505";
-    setTimeout(() => (document.body.style.backgroundColor = ""), 220);
+    setTimeout(() => (document.body.style.backgroundColor = ""), 500);
+  }
+
+  function handleClearEmergency() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const clearMsg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "clear_emergency",
+        target: "all",
+        payload: {},
+        ts: Date.now() / 1000
+      };
+      ws.send(JSON.stringify(clearMsg));
+    }
   }
 
   // build mode-specific inner content, then render a single Card that includes the shared emergency button
@@ -273,7 +381,6 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             Talk
           </Button>
 
-          {/* Mute button highlighted red and widened */}
           <Button
             onClick={() => setVoiceActive(false)}
             style={{ background: "#c62828", color: "#fff", flex: 1, height: 52, fontWeight: 700 }}
@@ -303,7 +410,6 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontWeight: 700, color: "#cfe8ff", marginBottom: 6 }}>Voice Settings</div>
-          {/* voice settings container uses the same subtle background as other boxes to avoid stepping on boundaries */}
           <div style={{ borderRadius: 8, padding: 12, background: "linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02))", border: "1px solid rgba(255,255,255,0.03)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", color: "#9fb0c2", fontSize: 13 }}>
               <div>Wake Word</div><div>"Hey AutoDrive"</div>
@@ -378,24 +484,58 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           <Joystick
             axis="vertical"
             label="Acceleration"
+            disabled={emergencyStatus.active}
             onChange={({ value }) => {
-              // value -1..1, up = +1 (forward), down = -1 (backward)
-              setAccel(value);
+              if (!emergencyStatus.active) {
+                setAccel(value);
+              }
             }}
-            // show signed percent where center is "0%"
             valueDisplay={`${Math.round(accel * 100)}%`}
           />
 
           <Joystick
             axis="horizontal"
             label="Steering"
+            disabled={emergencyStatus.active}
             onChange={({ value }) => {
-              setSteer(value);
-              onStatusUpdate && onStatusUpdate({ ...vehicleStatus, steering: value });
+              if (!emergencyStatus.active) {
+                setSteer(value);
+                onStatusUpdate && onStatusUpdate({ ...vehicleStatus, steering: value });
+              }
             }}
             valueDisplay={`${Math.round(steer * 45)}°`}
           />
         </div>
+
+        {/* Emergency Status Display */}
+        {emergencyStatus.active && (
+          <div style={{ 
+            marginTop: 16, 
+            padding: 12, 
+            borderRadius: 8, 
+            background: "linear-gradient(180deg, rgba(255,0,0,0.1), rgba(139,0,0,0.05))", 
+            border: "1px solid rgba(255,0,0,0.2)" 
+          }}>
+            <div style={{ color: "#ff6b6b", fontWeight: 700, marginBottom: 4 }}>
+              🚨 EMERGENCY MODE ACTIVE
+            </div>
+            <div style={{ color: "#ff9999", fontSize: 13, marginBottom: 8 }}>
+              Manual controls disabled • {emergencyStatus.ackReceived.length}/{emergencyStatus.devicesReached} devices acknowledged
+            </div>
+            <Button
+              onClick={handleClearEmergency}
+              style={{ 
+                background: "#2d8f2d", 
+                color: "#fff", 
+                fontSize: 13,
+                padding: "6px 12px",
+                height: "auto"
+              }}
+            >
+              Clear Emergency
+            </Button>
+          </div>
+        )}
 
         <div style={{ marginTop: 26 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -422,11 +562,21 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     <Card className="control-panel" shadow>
       {inner}
 
-      {/* Shared Emergency Stop (shown for all modes) */}
+      {/* Enhanced Emergency Stop Button */}
       <div style={{ marginTop: 22, display: "flex", justifyContent: "center" }}>
         <Button
           onClick={handleEmergency}
-          style={{ background: "#c62828", borderColor: "rgba(0,0,0,0.25)", boxShadow: "0 8px 20px rgba(198,40,40,0.18)", minWidth: 220, padding: "12px 20px" }}
+          disabled={emergencyStatus.active}
+          style={{ 
+            background: emergencyStatus.active ? "#8b0000" : "#c62828", 
+            borderColor: "rgba(0,0,0,0.25)", 
+            boxShadow: emergencyStatus.active 
+              ? "0 4px 12px rgba(139,0,0,0.3)" 
+              : "0 8px 20px rgba(198,40,40,0.18)", 
+            minWidth: 220, 
+            padding: "12px 20px",
+            opacity: emergencyStatus.active ? 0.7 : 1
+          }}
           className="emergency-btn"
         >
           <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
@@ -435,7 +585,9 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
               <path d="M12 7v6" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M12 16h.01" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            <span style={{ color: "#fff", fontWeight: 700 }}>EMERGENCY STOP</span>
+            <span style={{ color: "#fff", fontWeight: 700 }}>
+              {emergencyStatus.active ? "EMERGENCY ACTIVE" : "EMERGENCY STOP"}
+            </span>
           </span>
         </Button>
       </div>

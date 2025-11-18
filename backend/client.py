@@ -12,10 +12,18 @@ import websockets
 # simulator state
 _current_speed = 0.0
 _current_angle = 0.0
+_emergency_active = False
+_last_emergency_time = 0.0
 
 def apply_manual_control(speed: float, angle: float):
     """Simulate applying manual control values from joystick"""
     global _current_speed, _current_angle
+    
+    # Block manual control if in emergency mode
+    if _emergency_active:
+        print("[BLOCKED] Manual control blocked - emergency stop active")
+        return False
+    
     # clamp speed/angle to -1..1
     s = max(-1.0, min(1.0, float(speed)))
     a = max(-1.0, min(1.0, float(angle)))
@@ -45,6 +53,29 @@ def apply_manual_control(speed: float, angle: float):
     angle_deg = int(a * 45)  # e.g. full-left/right -> +/-45 deg
     print(f"[CONTROL] Manual control -> speed={s:.2f} ({speed_pct}%), angle={a:.2f} ({angle_deg}°)")
     print(f"[MOTORS] PWM={motor_pwm} {motor_direction}, Servo={servo_position}μs, Differential L={left_pwm} R={right_pwm}")
+    return True
+
+def emergency_stop():
+    """Immediate emergency stop - highest priority"""
+    global _current_speed, _current_angle, _emergency_active, _last_emergency_time
+    
+    _emergency_active = True
+    _last_emergency_time = time.time()
+    _current_speed = 0.0
+    _current_angle = 0.0
+    
+    print("=" * 60)
+    print("🚨 EMERGENCY STOP ACTIVATED 🚨")
+    print(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("ALL MOTORS DISABLED IMMEDIATELY")
+    print("Manual controls BLOCKED until emergency cleared")
+    print("=" * 60)
+
+def clear_emergency():
+    """Clear emergency mode - restore normal operation"""
+    global _emergency_active
+    _emergency_active = False
+    print("✅ Emergency mode cleared - normal operation restored")
 
 async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_index: int = 0):
     async with websockets.connect(uri) as ws:
@@ -69,38 +100,61 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     payload = pkt.get("payload", {})
                     src = pkt.get("from") or pkt.get("device_id")
 
-                    if act == "control" and ptype == "manual_drive":
+                    # EMERGENCY STOP - highest priority handler
+                    if act == "control" and ptype == "emergency_stop":
+                        emergency_stop()
+                        # Send immediate acknowledgment
+                        ack = {
+                            "role": "pi", 
+                            "device_id": device_id, 
+                            "action": "telemetry", 
+                            "type": "emergency_ack", 
+                            "payload": {
+                                "status": "stopped",
+                                "motors_disabled": True,
+                                "emergency_timestamp": _last_emergency_time,
+                                "device_id": device_id
+                            }, 
+                            "ts": time.time()
+                        }
+                        await ws.send(json.dumps(ack))
+                        
+                    elif act == "control" and ptype == "manual_drive":
                         spd = payload.get("speed")
                         ang = payload.get("angle")
-                        apply_manual_control(spd if spd is not None else 0.0, ang if ang is not None else 0.0)
-                        # send ack back to server/frontend
+                        success = apply_manual_control(spd if spd is not None else 0.0, ang if ang is not None else 0.0)
+                        
+                        # Send ack back to server/frontend
                         ack = {
                             "role": "pi", 
                             "device_id": device_id, 
                             "action": "telemetry", 
                             "type": "control_ack", 
                             "payload": {
-                                "applied_speed": _current_speed, 
-                                "applied_angle": _current_angle,
-                                "motor_pwm": int(abs(_current_speed) * 255),
-                                "servo_position": 1500 + int(_current_angle * 500)
+                                "applied_speed": _current_speed if success else 0.0, 
+                                "applied_angle": _current_angle if success else 0.0,
+                                "motor_pwm": int(abs(_current_speed) * 255) if success else 0,
+                                "servo_position": 1500 + int(_current_angle * 500) if success else 1500,
+                                "emergency_active": _emergency_active,
+                                "blocked": not success
                             }, 
                             "ts": time.time()
                         }
                         await ws.send(json.dumps(ack))
-                    elif act == "control" and ptype == "emergency_stop":
-                        # emergency stop: zero speed immediately
-                        apply_manual_control(0.0, 0.0)
-                        print("[EMERGENCY] STOP APPLIED - ALL MOTORS DISABLED")
+                        
+                    elif act == "control" and ptype == "clear_emergency":
+                        clear_emergency()
+                        # Send acknowledgment that emergency was cleared
                         ack = {
                             "role": "pi", 
                             "device_id": device_id, 
                             "action": "telemetry", 
-                            "type": "emergency_ack", 
-                            "payload": {"status": "stopped"}, 
+                            "type": "emergency_cleared_ack", 
+                            "payload": {"status": "normal_operation", "device_id": device_id}, 
                             "ts": time.time()
                         }
                         await ws.send(json.dumps(ack))
+                        
                     else:
                         # log other messages
                         print("RECV PKT:", pkt)
@@ -144,13 +198,15 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             }
                             await ws.send(json.dumps(packet))
                 
-                # Send periodic status update
+                # Send periodic status update (enhanced with emergency status)
                 status_payload = {
                     "speed": _current_speed,
                     "angle": _current_angle,
                     "battery": 85.2,
                     "temperature": 42.1,
-                    "connected": True
+                    "connected": True,
+                    "emergency_active": _emergency_active,
+                    "last_emergency": _last_emergency_time if _emergency_active else None
                 }
                 status_packet = {
                     "role": "pi",
