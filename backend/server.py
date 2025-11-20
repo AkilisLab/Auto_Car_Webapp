@@ -314,7 +314,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     continue
                 
-                # Regular control messages (including clear_emergency)
+                # ROUTE CONTROL MESSAGES - route start/stop commands
+                elif ptype in ["auto_route_start", "auto_route_stop"]:
+                    if target == "all" or payload.get("broadcast", False):
+                        await manager.broadcast_to_pis(envelope)
+                        await manager.send_json({"status": "route_command_sent", "target": "all", "type": ptype}, websocket)
+                    elif target:
+                        ok = await manager.send_to_device(target, envelope)
+                        if not ok:
+                            await manager.send_json({"error": "target offline", "target": target}, websocket)
+                        else:
+                            await manager.send_json({"status": "route_command_sent", "target": target, "type": ptype}, websocket)
+                    else:
+                        await manager.send_json({"error": "missing target for route command"}, websocket)
+                    continue
+                
+                # Regular control messages (manual drive, clear emergency, etc.)
                 if target == "all" or payload.get("broadcast", False):
                     await manager.broadcast_to_pis(envelope)
                     await manager.send_json({"status": "sent", "target": "all"}, websocket)

@@ -1,5 +1,6 @@
 """Pi simulator: capture camera frames with OpenCV and send as base64 JPEG via WebSocket.
    Also listens for incoming control messages (manual_drive) and simulates applying them.
+   Now includes autonomous navigation simulation.
 """
 import asyncio
 import sys
@@ -8,6 +9,8 @@ import base64
 import time
 import cv2
 import websockets
+import math
+import random
 
 # simulator state
 _current_speed = 0.0
@@ -15,13 +18,178 @@ _current_angle = 0.0
 _emergency_active = False
 _last_emergency_time = 0.0
 
+# autonomous navigation state
+_route_active = False
+_route_destination = ""
+_route_settings = {}
+_current_lat = 40.7128  # Starting at NYC coordinates
+_current_lng = -74.0060
+_target_lat = 0.0
+_target_lng = 0.0
+_route_progress = 0.0
+_route_start_time = 0.0
+_simulated_speed = 0.0  # autonomous speed
+_waypoints = []
+_current_waypoint = 0
+
+def generate_mock_route(destination: str):
+    """Generate mock GPS waypoints for a destination"""
+    global _waypoints, _target_lat, _target_lng
+    
+    # Mock destinations with coordinates
+    destinations = {
+        "home": (40.7500, -73.9850),
+        "work": (40.7589, -73.9851),
+        "mall": (40.7614, -73.9776),
+        "airport": (40.6413, -73.7781),
+        "downtown": (40.7831, -73.9712)
+    }
+    
+    # Try to match destination to known locations, otherwise use random nearby coordinates
+    dest_lower = destination.lower()
+    for key, coords in destinations.items():
+        if key in dest_lower:
+            _target_lat, _target_lng = coords
+            break
+    else:
+        # Random destination within 5 miles
+        _target_lat = _current_lat + random.uniform(-0.05, 0.05)
+        _target_lng = _current_lng + random.uniform(-0.05, 0.05)
+    
+    # Generate waypoints between current and target
+    num_waypoints = random.randint(3, 8)
+    _waypoints = []
+    
+    for i in range(num_waypoints + 1):
+        progress = i / num_waypoints
+        lat = _current_lat + (_target_lat - _current_lat) * progress
+        lng = _current_lng + (_target_lng - _current_lng) * progress
+        
+        # Add some randomness to make it look like real turns
+        if i > 0 and i < num_waypoints:
+            lat += random.uniform(-0.002, 0.002)
+            lng += random.uniform(-0.002, 0.002)
+        
+        _waypoints.append((lat, lng))
+    
+    print(f"[ROUTE] Generated {len(_waypoints)} waypoints to {destination}")
+    return _waypoints
+
+def calculate_distance(lat1, lng1, lat2, lng2):
+    """Calculate distance between two coordinates in miles"""
+    # Simplified distance calculation
+    lat_diff = lat2 - lat1
+    lng_diff = lng2 - lng1
+    return math.sqrt(lat_diff**2 + lng_diff**2) * 69  # Rough miles conversion
+
+def get_navigation_instruction(current_waypoint_idx):
+    """Generate turn-by-turn instructions"""
+    if current_waypoint_idx >= len(_waypoints) - 1:
+        return "Arrive at destination"
+    
+    instructions = [
+        "Continue straight",
+        "Turn right on Oak Street", 
+        "Turn left on Main Street",
+        "Take the ramp to Highway 95",
+        "Exit at Downtown",
+        "Turn right on Broadway",
+        "Turn left on 5th Avenue"
+    ]
+    
+    return random.choice(instructions)
+
+async def simulate_autonomous_navigation():
+    """Simulate autonomous driving along the route"""
+    global _current_lat, _current_lng, _route_progress, _simulated_speed, _current_waypoint
+    
+    if not _route_active or not _waypoints:
+        return None
+    
+    # Move towards current waypoint
+    if _current_waypoint < len(_waypoints):
+        target_lat, target_lng = _waypoints[_current_waypoint]
+        
+        # Calculate movement step (simulate driving speed)
+        speed_factor = 0.0001  # Adjust for realistic movement
+        lat_step = (target_lat - _current_lat) * speed_factor
+        lng_step = (target_lng - _current_lng) * speed_factor
+        
+        _current_lat += lat_step
+        _current_lng += lng_step
+        
+        # Check if we've reached the current waypoint
+        distance_to_waypoint = calculate_distance(_current_lat, _current_lng, target_lat, target_lng)
+        if distance_to_waypoint < 0.1:  # Within 0.1 miles
+            _current_waypoint += 1
+            print(f"[NAV] Reached waypoint {_current_waypoint}/{len(_waypoints)}")
+        
+        # Calculate overall progress
+        _route_progress = _current_waypoint / max(1, len(_waypoints) - 1)
+        
+        # Simulate speed based on route type
+        if _route_settings.get("route_type") == "eco":
+            _simulated_speed = random.uniform(20, 30)
+        elif _route_settings.get("route_type") == "safe":
+            _simulated_speed = random.uniform(15, 25)
+        else:  # fastest
+            _simulated_speed = random.uniform(25, 35)
+        
+        # Add some randomness
+        _simulated_speed += random.uniform(-2, 2)
+        _simulated_speed = max(0, min(_simulated_speed, _route_settings.get("max_speed", 35)))
+        
+        return {
+            "status": "navigating" if _current_waypoint < len(_waypoints) else "arrived",
+            "destination": _route_destination,
+            "current_lat": round(_current_lat, 6),
+            "current_lng": round(_current_lng, 6),
+            "distance_remaining": calculate_distance(_current_lat, _current_lng, _target_lat, _target_lng),
+            "eta_minutes": max(1, int(calculate_distance(_current_lat, _current_lng, _target_lat, _target_lng) / (_simulated_speed / 60))),
+            "next_instruction": get_navigation_instruction(_current_waypoint),
+            "route_progress": min(1.0, _route_progress),
+            "current_speed": int(_simulated_speed),
+            "speed_limit": _route_settings.get("max_speed", 35)
+        }
+    
+    return None
+
+def start_autonomous_route(destination: str, settings: dict):
+    """Start autonomous navigation to destination"""
+    global _route_active, _route_destination, _route_settings, _route_start_time, _current_waypoint, _route_progress
+    
+    _route_active = True
+    _route_destination = destination
+    _route_settings = settings
+    _route_start_time = time.time()
+    _current_waypoint = 0
+    _route_progress = 0.0
+    
+    generate_mock_route(destination)
+    
+    print(f"[ROUTE] Started autonomous navigation to: {destination}")
+    print(f"[ROUTE] Settings: {settings}")
+
+def stop_autonomous_route(reason: str = "user_request"):
+    """Stop autonomous navigation"""
+    global _route_active, _simulated_speed
+    
+    _route_active = False
+    _simulated_speed = 0.0
+    
+    print(f"[ROUTE] Stopped autonomous navigation - reason: {reason}")
+
 def apply_manual_control(speed: float, angle: float):
     """Simulate applying manual control values from joystick"""
     global _current_speed, _current_angle
     
-    # Block manual control if in emergency mode
+    # Block manual control if in emergency mode or autonomous mode is active
     if _emergency_active:
         print("[BLOCKED] Manual control blocked - emergency stop active")
+        return False
+    
+    if _route_active:
+        print("[BLOCKED] Manual control blocked - autonomous mode active")
         return False
     
     # clamp speed/angle to -1..1
@@ -31,44 +199,45 @@ def apply_manual_control(speed: float, angle: float):
     _current_angle = a
     
     # Convert to motor-specific values for simulation
-    # For PWM motors (0-255 range typical):
-    motor_pwm = int(abs(s) * 255)  # 0-255 PWM value
+    motor_pwm = int(abs(s) * 255)
     motor_direction = "FORWARD" if s >= 0 else "REVERSE"
+    servo_center = 1500
+    servo_range = 500
+    servo_position = servo_center + int(a * servo_range)
     
-    # For servo steering (typically 1000-2000 microseconds):
-    servo_center = 1500  # center position microseconds
-    servo_range = 500   # +/- range from center
-    servo_position = servo_center + int(a * servo_range)  # 1000-2000
-    
-    # For differential drive (left/right motor speeds):
     base_speed = s
-    turn_factor = a * 0.5  # reduce turning sensitivity
+    turn_factor = a * 0.5
     left_motor = base_speed + turn_factor
     right_motor = base_speed - turn_factor
-    # Clamp to -1.0 to 1.0, then convert to PWM
     left_pwm = int(abs(max(-1.0, min(1.0, left_motor))) * 255)
     right_pwm = int(abs(max(-1.0, min(1.0, right_motor))) * 255)
     
     speed_pct = int(s * 100)
-    angle_deg = int(a * 45)  # e.g. full-left/right -> +/-45 deg
+    angle_deg = int(a * 45)
     print(f"[CONTROL] Manual control -> speed={s:.2f} ({speed_pct}%), angle={a:.2f} ({angle_deg}°)")
     print(f"[MOTORS] PWM={motor_pwm} {motor_direction}, Servo={servo_position}μs, Differential L={left_pwm} R={right_pwm}")
     return True
 
 def emergency_stop():
     """Immediate emergency stop - highest priority"""
-    global _current_speed, _current_angle, _emergency_active, _last_emergency_time
+    global _current_speed, _current_angle, _emergency_active, _last_emergency_time, _route_active, _simulated_speed
     
     _emergency_active = True
     _last_emergency_time = time.time()
     _current_speed = 0.0
     _current_angle = 0.0
     
+    # Stop autonomous navigation
+    if _route_active:
+        stop_autonomous_route("emergency_stop")
+    _simulated_speed = 0.0
+    
     print("=" * 60)
     print("🚨 EMERGENCY STOP ACTIVATED 🚨")
     print(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("ALL MOTORS DISABLED IMMEDIATELY")
     print("Manual controls BLOCKED until emergency cleared")
+    print("Autonomous navigation STOPPED")
     print("=" * 60)
 
 def clear_emergency():
@@ -88,7 +257,6 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
         async def receiver():
             try:
                 async for message in ws:
-                    # incoming control messages routed by server
                     try:
                         pkt = json.loads(message)
                     except Exception:
@@ -113,7 +281,8 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                                 "status": "stopped",
                                 "motors_disabled": True,
                                 "emergency_timestamp": _last_emergency_time,
-                                "device_id": device_id
+                                "device_id": device_id,
+                                "route_stopped": True
                             }, 
                             "ts": time.time()
                         }
@@ -136,12 +305,77 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                                 "motor_pwm": int(abs(_current_speed) * 255) if success else 0,
                                 "servo_position": 1500 + int(_current_angle * 500) if success else 1500,
                                 "emergency_active": _emergency_active,
+                                "route_active": _route_active,
                                 "blocked": not success
                             }, 
                             "ts": time.time()
                         }
                         await ws.send(json.dumps(ack))
+                    
+                    elif act == "control" and ptype == "auto_route_start":
+                        destination = payload.get("destination", "Unknown")
+                        settings = {
+                            "route_type": payload.get("route_type", "fastest"),
+                            "max_speed": payload.get("max_speed", 35),
+                            "following_distance": payload.get("following_distance", "safe")
+                        }
                         
+                        if not _emergency_active:
+                            start_autonomous_route(destination, settings)
+                            ack = {
+                                "role": "pi",
+                                "device_id": device_id,
+                                "action": "telemetry",
+                                "type": "route_ack",
+                                "payload": {"status": "route_started", "destination": destination},
+                                "ts": time.time()
+                            }
+                        else:
+                            ack = {
+                                "role": "pi",
+                                "device_id": device_id,
+                                "action": "telemetry",
+                                "type": "route_ack",
+                                "payload": {"status": "blocked_emergency", "destination": destination},
+                                "ts": time.time()
+                            }
+                        await ws.send(json.dumps(ack))
+                    
+                    elif act == "control" and ptype == "auto_route_stop":
+                        reason = payload.get("reason", "user_request")
+                        stop_autonomous_route(reason)
+                        ack = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "route_ack",
+                            "payload": {"status": "route_stopped", "reason": reason},
+                            "ts": time.time()
+                        }
+                        await ws.send(json.dumps(ack))
+                        
+                        # Also send updated route status to clear frontend display
+                        route_status_update = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "route_status",
+                            "payload": {
+                                "status": "idle",
+                                "destination": "",
+                                "current_lat": _current_lat,
+                                "current_lng": _current_lng,
+                                "distance_remaining": 0,
+                                "eta_minutes": 0,
+                                "next_instruction": "",
+                                "route_progress": 0,
+                                "current_speed": 0,
+                                "speed_limit": 35
+                            },
+                            "ts": time.time()
+                        }
+                        await ws.send(json.dumps(route_status_update))
+
                     elif act == "control" and ptype == "clear_emergency":
                         clear_emergency()
                         # Send acknowledgment that emergency was cleared
@@ -198,14 +432,15 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             }
                             await ws.send(json.dumps(packet))
                 
-                # Send periodic status update (enhanced with emergency status)
+                # Send periodic status update (enhanced with route status)
                 status_payload = {
-                    "speed": _current_speed,
+                    "speed": _simulated_speed if _route_active else _current_speed,
                     "angle": _current_angle,
                     "battery": 85.2,
                     "temperature": 42.1,
                     "connected": True,
                     "emergency_active": _emergency_active,
+                    "route_active": _route_active,
                     "last_emergency": _last_emergency_time if _emergency_active else None
                 }
                 status_packet = {
@@ -217,6 +452,24 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     "ts": time.time()
                 }
                 await ws.send(json.dumps(status_packet))
+                
+                # Send route status if navigation is active
+                if _route_active:
+                    route_status = await simulate_autonomous_navigation()
+                    if route_status:
+                        route_packet = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "route_status",
+                            "payload": route_status,
+                            "ts": time.time()
+                        }
+                        await ws.send(json.dumps(route_packet))
+                        
+                        # Check if route completed
+                        if route_status["status"] == "arrived":
+                            stop_autonomous_route("destination_reached")
                 
                 # sleep remaining time
                 elapsed = time.time() - start

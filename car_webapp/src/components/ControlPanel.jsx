@@ -167,6 +167,27 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     timestamp: null
   });
 
+  // Add route status state
+  const [routeStatus, setRouteStatus] = useState({
+    status: "idle", // "idle" | "planning" | "navigating" | "arrived" | "error"
+    destination: "",
+    current_lat: 0,
+    current_lng: 0,
+    distance_remaining: 0,
+    eta_minutes: 0,
+    next_instruction: "",
+    route_progress: 0,
+    current_speed: 0,
+    speed_limit: 35
+  });
+
+  // Add route settings state
+  const [routeSettings, setRouteSettings] = useState({
+    route_type: "fastest", // "fastest" | "eco" | "safe"
+    max_speed: 35,
+    following_distance: "safe" // "close" | "safe" | "far"
+  });
+
   // WebSocket connection setup
   useEffect(() => {
     const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
@@ -174,7 +195,6 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
     websocket.addEventListener("open", () => {
       console.log("ControlPanel WebSocket connected");
-      // handshake as frontend
       const hs = { 
         role: "frontend", 
         device_id: `control-${Math.floor(Math.random()*10000)}`, 
@@ -241,6 +261,37 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             timestamp: null
           }));
           console.log(`Emergency cleared and acknowledged by ${msg.from}:`, msg.payload);
+        }
+
+        // Handle route status updates from Pi
+        if (msg.action === "telemetry" && msg.type === "route_status") {
+          setRouteStatus(msg.payload);
+          // Update routeActive based on Pi status, not just "navigating"
+          setRouteActive(msg.payload.status === "navigating" || msg.payload.status === "planning");
+          console.log("Route status update:", msg.payload);
+        }
+
+        // Handle route acknowledgments
+        if (msg.action === "telemetry" && msg.type === "route_ack") {
+          console.log("Route command acknowledged:", msg.payload);
+          
+          // Handle different route acknowledgment statuses
+          if (msg.payload.status === "route_stopped") {
+            // Ensure UI resets when route is stopped
+            setRouteActive(false);
+            setRouteStatus(prev => ({
+              ...prev,
+              status: "idle",
+              destination: "",
+              distance_remaining: 0,
+              eta_minutes: 0,
+              next_instruction: "",
+              route_progress: 0,
+              current_speed: 0
+            }));
+          } else if (msg.payload.status === "route_started") {
+            setRouteActive(true);
+          }
         }
         
       } catch (e) {
@@ -316,6 +367,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     // Immediate local feedback
     setAccel(0);
     setSteer(0);
+    setRouteActive(false);
     setEmergencyStatus(prev => ({
       ...prev,
       active: true,
@@ -348,6 +400,60 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         ts: Date.now() / 1000
       };
       ws.send(JSON.stringify(clearMsg));
+    }
+  }
+
+  // Route control functions
+  function handleStartRoute() {
+    if (ws && ws.readyState === WebSocket.OPEN && route && !emergencyStatus.active) {
+      const routeMsg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "auto_route_start",
+        target: "pi-01", // TODO: make this configurable
+        payload: {
+          destination: route,
+          route_type: routeSettings.route_type,
+          max_speed: routeSettings.max_speed,
+          following_distance: routeSettings.following_distance
+        },
+        ts: Date.now() / 1000
+      };
+      ws.send(JSON.stringify(routeMsg));
+      console.log("Sent route start command:", routeMsg);
+    }
+  }
+
+  function handleStopRoute() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const stopMsg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "auto_route_stop",
+        target: "pi-01",
+        payload: {
+          reason: "user_request"
+        },
+        ts: Date.now() / 1000
+      };
+      ws.send(JSON.stringify(stopMsg));
+      
+      // Immediately reset local state - don't wait for Pi response
+      setRouteActive(false);
+      setRouteStatus(prev => ({
+        ...prev,
+        status: "idle",
+        destination: "",
+        distance_remaining: 0,
+        eta_minutes: 0,
+        next_instruction: "",
+        route_progress: 0,
+        current_speed: 0
+      }));
+      
+      console.log("Sent route stop command:", stopMsg);
     }
   }
 
@@ -434,9 +540,6 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           </Button>
         </div>
 
-        {/* Emergency Status Display */}
-        <EmergencyStatusDisplay />
-
         <div style={{ marginTop: emergencyStatus.active ? 16 : 8 }}>
           <div style={{ fontWeight: 700, color: "#cfe8ff", marginBottom: 8 }}>Quick Commands</div>
 
@@ -479,6 +582,9 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             </div>
           </div>
         </div>
+
+        {/* Emergency Status Display */}
+        <EmergencyStatusDisplay />
       </>
     );
   } else if (mode === "auto") {
@@ -491,11 +597,12 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           </div>
           <div>
             <Badge variant="success" size="sm">
-              {routeActive && !emergencyStatus.active ? "Active" : emergencyStatus.active ? "Emergency" : "Standby"}
+              {emergencyStatus.active ? "Emergency" : routeStatus.status === "navigating" ? "Navigating" : routeStatus.status === "planning" ? "Planning" : "Standby"}
             </Badge>
           </div>
         </div>
 
+        {/* Route Status Display */}
         <div style={{ 
           border: "1px solid rgba(255,255,255,0.03)", 
           borderRadius: 8, 
@@ -505,15 +612,36 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         }}>
           <div style={{ color: "#9fb0c2", marginBottom: 6 }}>
             Navigating to: <strong style={{ color: "#e6eef8" }}>
-              {emergencyStatus.active ? "STOPPED" : routeActive ? route || "—" : "—"}
+              {emergencyStatus.active ? "STOPPED" : routeStatus.destination || route || "—"}
             </strong>
           </div>
-          <div style={{ color: "#9fb0c2" }}>
-            ETA: {emergencyStatus.active ? "—" : routeActive ? "12 minutes" : "—"}
+          <div style={{ color: "#9fb0c2", marginBottom: 4 }}>
+            ETA: {emergencyStatus.active ? "—" : routeStatus.eta_minutes > 0 ? `${routeStatus.eta_minutes} minutes` : "—"}
           </div>
+          {routeStatus.status === "navigating" && (
+            <>
+              <div style={{ color: "#9fb0c2", marginBottom: 6, fontSize: 13 }}>
+                Distance: {routeStatus.distance_remaining.toFixed(1)} miles • Speed: {routeStatus.current_speed} mph
+              </div>
+              {routeStatus.next_instruction && (
+                <div style={{ color: "#6ee7b7", fontSize: 13, fontWeight: 600 }}>
+                  📍 {routeStatus.next_instruction}
+                </div>
+              )}
+              {/* Progress Bar */}
+              <div style={{ marginTop: 8, background: "rgba(255,255,255,0.1)", borderRadius: 4, height: 4 }}>
+                <div style={{ 
+                  background: "linear-gradient(90deg, #6ee7b7, #3be1d0)", 
+                  borderRadius: 4, 
+                  height: 4, 
+                  width: `${routeStatus.route_progress * 100}%`,
+                  transition: "width 1s ease"
+                }} />
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Emergency Status Display */}
         <EmergencyStatusDisplay />
 
         <div style={{ marginBottom: 12, marginTop: emergencyStatus.active ? 16 : 0 }}>
@@ -521,36 +649,34 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           <Input 
             value={route} 
             onChange={(e) => setRoute(e.target.value)} 
-            placeholder="Enter destination"
-            disabled={emergencyStatus.active}
-            style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}
+            placeholder="Enter destination (e.g., 123 Main St, City)"
+            disabled={emergencyStatus.active || routeActive}
+            style={{ opacity: emergencyStatus.active || routeActive ? 0.5 : 1 }}
           />
         </div>
 
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <Button
-            onClick={() => { 
-              if (route && !emergencyStatus.active) {
-                setRouteActive(true); 
-              }
-            }}
-            disabled={emergencyStatus.active}
+            onClick={handleStartRoute}
+            disabled={emergencyStatus.active || !route || routeActive}
             style={{ 
-              background: emergencyStatus.active ? "#666" : "#1f57d8",
-              opacity: emergencyStatus.active ? 0.5 : 1
+              background: emergencyStatus.active ? "#666" : routeActive ? "#666" : "#1f57d8",
+              opacity: (emergencyStatus.active || routeActive) ? 0.5 : 1
             }}
           >
-            {emergencyStatus.active ? "Disabled" : "Start Route"}
+            {emergencyStatus.active ? "Disabled" : routeActive ? "Navigating" : "Start Route"}
           </Button>
           <Button
-            onClick={() => { setRouteActive(false); }}
+            onClick={handleStopRoute}
+            disabled={!routeActive}
             variant="ghost"
-            style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}
+            style={{ opacity: !routeActive ? 0.5 : 1 }}
           >
             Stop Route
           </Button>
         </div>
 
+        {/* Route Settings */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 6 }}>
           <div style={{ 
             border: "1px solid rgba(255,255,255,0.03)", 
@@ -560,7 +686,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             opacity: emergencyStatus.active ? 0.5 : 1
           }}>
             <div style={{ color: emergencyStatus.active ? "#999" : "#6ee7b7", fontWeight: 700 }}>
-              {emergencyStatus.active ? "Disabled" : "Eco"}
+              {emergencyStatus.active ? "Disabled" : routeSettings.route_type === "eco" ? "Eco" : routeSettings.route_type === "safe" ? "Safe" : "Fast"}
             </div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Driving Mode</div>
           </div>
@@ -572,7 +698,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             opacity: emergencyStatus.active ? 0.5 : 1
           }}>
             <div style={{ color: emergencyStatus.active ? "#999" : "#9ed0ff", fontWeight: 700 }}>
-              {emergencyStatus.active ? "Disabled" : "Safe"}
+              {emergencyStatus.active ? "Disabled" : routeSettings.following_distance === "close" ? "Close" : routeSettings.following_distance === "far" ? "Far" : "Safe"}
             </div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Following Distance</div>
           </div>
@@ -588,7 +714,9 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           <div style={{ color: emergencyStatus.active ? "#ff6b6b" : "#ffb997" }}>
             {emergencyStatus.active 
               ? "🚨 Emergency stop activated - autonomous navigation disabled" 
-              : "⚠ Keep hands near steering wheel for safety"}
+              : routeStatus.status === "navigating" 
+                ? "🤖 Autonomous navigation active - monitoring route progress"
+                : "⚠ Keep hands near steering wheel for safety"}
           </div>
         </div>
       </>
