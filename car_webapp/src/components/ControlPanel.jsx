@@ -351,6 +351,43 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     }
   }
 
+  // Move emergency status display outside mode-specific sections
+  const EmergencyStatusDisplay = () => {
+    if (!emergencyStatus.active) return null;
+    
+    return (
+      <div style={{ 
+        marginTop: 16, 
+        padding: 12, 
+        borderRadius: 8, 
+        background: "linear-gradient(180deg, rgba(255,0,0,0.1), rgba(139,0,0,0.05))", 
+        border: "1px solid rgba(255,0,0,0.2)" 
+      }}>
+        <div style={{ color: "#ff6b6b", fontWeight: 700, marginBottom: 4 }}>
+          🚨 EMERGENCY MODE ACTIVE
+        </div>
+        <div style={{ color: "#ff9999", fontSize: 13, marginBottom: 8 }}>
+          {mode === "manual" && "Manual controls disabled • "}
+          {mode === "auto" && "Autonomous navigation stopped • "}
+          {mode === "audio" && "Voice commands disabled • "}
+          {emergencyStatus.ackReceived.length}/{emergencyStatus.devicesReached} devices acknowledged
+        </div>
+        <Button
+          onClick={handleClearEmergency}
+          style={{ 
+            background: "#2d8f2d", 
+            color: "#fff", 
+            fontSize: 13,
+            padding: "6px 12px",
+            height: "auto"
+          }}
+        >
+          Clear Emergency
+        </Button>
+      </div>
+    );
+  };
+
   // build mode-specific inner content, then render a single Card that includes the shared emergency button
   let inner = null;
 
@@ -369,16 +406,23 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             <div style={{ fontWeight: 700, fontSize: 18, color: "#e6eef8" }}>Voice Control</div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Hands-free operation</div>
           </div>
-          <div><Badge variant="muted" size="sm">{voiceActive ? "Active" : "Standby"}</Badge></div>
+          <div><Badge variant="muted" size="sm">{voiceActive && !emergencyStatus.active ? "Active" : "Standby"}</Badge></div>
         </div>
 
         <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
           <Button
             onClick={() => setVoiceActive(true)}
-            style={{ background: "#14a354", flex: 1, height: 52, fontWeight: 700 }}
+            disabled={emergencyStatus.active}
+            style={{ 
+              background: emergencyStatus.active ? "#666" : "#14a354", 
+              flex: 1, 
+              height: 52, 
+              fontWeight: 700,
+              opacity: emergencyStatus.active ? 0.5 : 1 
+            }}
             aria-label="Talk"
           >
-            Talk
+            {emergencyStatus.active ? "Disabled" : "Talk"}
           </Button>
 
           <Button
@@ -390,7 +434,10 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           </Button>
         </div>
 
-        <div style={{ marginTop: 8 }}>
+        {/* Emergency Status Display */}
+        <EmergencyStatusDisplay />
+
+        <div style={{ marginTop: emergencyStatus.active ? 16 : 8 }}>
           <div style={{ fontWeight: 700, color: "#cfe8ff", marginBottom: 8 }}>Quick Commands</div>
 
           <div style={{ display: "grid", gap: 8 }}>
@@ -398,11 +445,15 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
               <QuickCommandButton
                 key={q}
                 onClick={() => {
-                  console.log("Quick command:", q);
-                  setVoiceActive(true);
+                  if (!emergencyStatus.active) {
+                    console.log("Quick command:", q);
+                    setVoiceActive(true);
+                  }
                 }}
               >
-                {q}
+                <span style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}>
+                  {q}
+                </span>
               </QuickCommandButton>
             ))}
           </div>
@@ -410,7 +461,13 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontWeight: 700, color: "#cfe8ff", marginBottom: 6 }}>Voice Settings</div>
-          <div style={{ borderRadius: 8, padding: 12, background: "linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02))", border: "1px solid rgba(255,255,255,0.03)" }}>
+          <div style={{ 
+            borderRadius: 8, 
+            padding: 12, 
+            background: "linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02))", 
+            border: "1px solid rgba(255,255,255,0.03)",
+            opacity: emergencyStatus.active ? 0.5 : 1
+          }}>
             <div style={{ display: "flex", justifyContent: "space-between", color: "#9fb0c2", fontSize: 13 }}>
               <div>Wake Word</div><div>"Hey AutoDrive"</div>
             </div>
@@ -432,52 +489,112 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             <div style={{ fontWeight: 700, fontSize: 18, color: "#e6eef8" }}>Autonomous Mode</div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>AI-powered navigation</div>
           </div>
-          <div><Badge variant="success" size="sm">{routeActive ? "Active" : "Standby"}</Badge></div>
+          <div>
+            <Badge variant="success" size="sm">
+              {routeActive && !emergencyStatus.active ? "Active" : emergencyStatus.active ? "Emergency" : "Standby"}
+            </Badge>
+          </div>
         </div>
 
-        <div style={{ border: "1px solid rgba(255,255,255,0.03)", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          <div style={{ color: "#9fb0c2", marginBottom: 6 }}>Navigating to: <strong style={{ color: "#e6eef8" }}>{routeActive ? route || "—" : "—"}</strong></div>
-          <div style={{ color: "#9fb0c2" }}>ETA: {routeActive ? "12 minutes" : "—"}</div>
+        <div style={{ 
+          border: "1px solid rgba(255,255,255,0.03)", 
+          borderRadius: 8, 
+          padding: 12, 
+          marginBottom: 12,
+          opacity: emergencyStatus.active ? 0.5 : 1
+        }}>
+          <div style={{ color: "#9fb0c2", marginBottom: 6 }}>
+            Navigating to: <strong style={{ color: "#e6eef8" }}>
+              {emergencyStatus.active ? "STOPPED" : routeActive ? route || "—" : "—"}
+            </strong>
+          </div>
+          <div style={{ color: "#9fb0c2" }}>
+            ETA: {emergencyStatus.active ? "—" : routeActive ? "12 minutes" : "—"}
+          </div>
         </div>
 
-        <div style={{ marginBottom: 12 }}>
+        {/* Emergency Status Display */}
+        <EmergencyStatusDisplay />
+
+        <div style={{ marginBottom: 12, marginTop: emergencyStatus.active ? 16 : 0 }}>
           <div style={{ fontWeight: 700, color: "#cfe8ff", marginBottom: 6 }}>Destination</div>
-          <Input value={route} onChange={(e) => setRoute(e.target.value)} placeholder="Enter destination" />
+          <Input 
+            value={route} 
+            onChange={(e) => setRoute(e.target.value)} 
+            placeholder="Enter destination"
+            disabled={emergencyStatus.active}
+            style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}
+          />
         </div>
 
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <Button
-            onClick={() => { if (route) setRouteActive(true); }}
-            style={{ background: "#1f57d8" }}
+            onClick={() => { 
+              if (route && !emergencyStatus.active) {
+                setRouteActive(true); 
+              }
+            }}
+            disabled={emergencyStatus.active}
+            style={{ 
+              background: emergencyStatus.active ? "#666" : "#1f57d8",
+              opacity: emergencyStatus.active ? 0.5 : 1
+            }}
           >
-            Start Route
+            {emergencyStatus.active ? "Disabled" : "Start Route"}
           </Button>
           <Button
             onClick={() => { setRouteActive(false); }}
             variant="ghost"
+            style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}
           >
             Stop Route
           </Button>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 6 }}>
-          <div style={{ border: "1px solid rgba(255,255,255,0.03)", padding: 12, borderRadius: 8, textAlign: "center" }}>
-            <div style={{ color: "#6ee7b7", fontWeight: 700 }}>Eco</div>
+          <div style={{ 
+            border: "1px solid rgba(255,255,255,0.03)", 
+            padding: 12, 
+            borderRadius: 8, 
+            textAlign: "center",
+            opacity: emergencyStatus.active ? 0.5 : 1
+          }}>
+            <div style={{ color: emergencyStatus.active ? "#999" : "#6ee7b7", fontWeight: 700 }}>
+              {emergencyStatus.active ? "Disabled" : "Eco"}
+            </div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Driving Mode</div>
           </div>
-          <div style={{ border: "1px solid rgba(255,255,255,0.03)", padding: 12, borderRadius: 8, textAlign: "center" }}>
-            <div style={{ color: "#9ed0ff", fontWeight: 700 }}>Safe</div>
+          <div style={{ 
+            border: "1px solid rgba(255,255,255,0.03)", 
+            padding: 12, 
+            borderRadius: 8, 
+            textAlign: "center",
+            opacity: emergencyStatus.active ? 0.5 : 1
+          }}>
+            <div style={{ color: emergencyStatus.active ? "#999" : "#9ed0ff", fontWeight: 700 }}>
+              {emergencyStatus.active ? "Disabled" : "Safe"}
+            </div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Following Distance</div>
           </div>
         </div>
 
-        <div style={{ marginTop: 12, borderRadius: 8, padding: 12, background: "linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02))", border: "1px solid rgba(255,80,0,0.06)" }}>
-          <div style={{ color: "#ffb997" }}>⚠ Keep hands near steering wheel for safety</div>
+        <div style={{ 
+          marginTop: 12, 
+          borderRadius: 8, 
+          padding: 12, 
+          background: "linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02))", 
+          border: emergencyStatus.active ? "1px solid rgba(255,0,0,0.2)" : "1px solid rgba(255,80,0,0.06)" 
+        }}>
+          <div style={{ color: emergencyStatus.active ? "#ff6b6b" : "#ffb997" }}>
+            {emergencyStatus.active 
+              ? "🚨 Emergency stop activated - autonomous navigation disabled" 
+              : "⚠ Keep hands near steering wheel for safety"}
+          </div>
         </div>
       </>
     );
   } else {
-    // manual
+    // manual mode
     inner = (
       <>
         <div style={{ display: "flex", gap: 28, alignItems: "flex-start", justifyContent: "center", flexWrap: "wrap" }}>
@@ -508,36 +625,9 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         </div>
 
         {/* Emergency Status Display */}
-        {emergencyStatus.active && (
-          <div style={{ 
-            marginTop: 16, 
-            padding: 12, 
-            borderRadius: 8, 
-            background: "linear-gradient(180deg, rgba(255,0,0,0.1), rgba(139,0,0,0.05))", 
-            border: "1px solid rgba(255,0,0,0.2)" 
-          }}>
-            <div style={{ color: "#ff6b6b", fontWeight: 700, marginBottom: 4 }}>
-              🚨 EMERGENCY MODE ACTIVE
-            </div>
-            <div style={{ color: "#ff9999", fontSize: 13, marginBottom: 8 }}>
-              Manual controls disabled • {emergencyStatus.ackReceived.length}/{emergencyStatus.devicesReached} devices acknowledged
-            </div>
-            <Button
-              onClick={handleClearEmergency}
-              style={{ 
-                background: "#2d8f2d", 
-                color: "#fff", 
-                fontSize: 13,
-                padding: "6px 12px",
-                height: "auto"
-              }}
-            >
-              Clear Emergency
-            </Button>
-          </div>
-        )}
+        <EmergencyStatusDisplay />
 
-        <div style={{ marginTop: 26 }}>
+        <div style={{ marginTop: emergencyStatus.active ? 16 : 26 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ fontWeight: 700, color: "#e6eef8" }}>Climate Control</div>
             <div style={{ color: "#9fb0c2", fontSize: 13 }}>Adjust interior air conditioning and heating</div>
@@ -545,7 +635,15 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
             <div style={{ flex: 1 }}>
-              <Slider min={60} max={85} step={1} value={Math.round(temp)} onChange={(e) => setTemp(Number(e.target.value))} />
+              <Slider 
+                min={60} 
+                max={85} 
+                step={1} 
+                value={Math.round(temp)} 
+                onChange={(e) => setTemp(Number(e.target.value))}
+                disabled={emergencyStatus.active}
+                style={{ opacity: emergencyStatus.active ? 0.5 : 1 }}
+              />
               <div style={{ display: "flex", justifyContent: "space-between", color: "#9fb0c2", fontSize: 12, marginTop: 6 }}>
                 <span>Cool (60°)</span>
                 <span>Warm (85°)</span>
@@ -562,7 +660,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     <Card className="control-panel" shadow>
       {inner}
 
-      {/* Enhanced Emergency Stop Button */}
+      {/* Enhanced Emergency Stop Button - Works in ALL modes */}
       <div style={{ marginTop: 22, display: "flex", justifyContent: "center" }}>
         <Button
           onClick={handleEmergency}
