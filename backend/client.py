@@ -1,6 +1,6 @@
 """Pi simulator: capture camera frames with OpenCV and send as base64 JPEG via WebSocket.
    Also listens for incoming control messages (manual_drive) and simulates applying them.
-   Now includes autonomous navigation simulation.
+   Now includes autonomous navigation simulation and grid-based route following.
 """
 import asyncio
 import sys
@@ -18,7 +18,7 @@ _current_angle = 0.0
 _emergency_active = False
 _last_emergency_time = 0.0
 
-# autonomous navigation state
+# autonomous navigation state (GPS-style mock)
 _route_active = False
 _route_destination = ""
 _route_settings = {}
@@ -31,6 +31,14 @@ _route_start_time = 0.0
 _simulated_speed = 0.0  # autonomous speed
 _waypoints = []
 _current_waypoint = 0
+
+# NEW: grid-based navigation state (from server A* waypoints)
+_grid_route_active = False
+_grid_waypoints = []  # list of dicts: {'row', 'col', 'heading'}
+_grid_current_index = 0
+_grid_start_time = 0.0
+_grid_speed_cells_per_sec = 0.5  # simulation speed across cells
+
 
 def generate_mock_route(destination: str):
     """Generate mock GPS waypoints for a destination"""
@@ -66,7 +74,7 @@ def generate_mock_route(destination: str):
         lng = _current_lng + (_target_lng - _current_lng) * progress
         
         # Add some randomness to make it look like real turns
-        if i > 0 and i < num_waypoints:
+        if 0 < i < num_waypoints:
             lat += random.uniform(-0.002, 0.002)
             lng += random.uniform(-0.002, 0.002)
         
@@ -75,12 +83,14 @@ def generate_mock_route(destination: str):
     print(f"[ROUTE] Generated {len(_waypoints)} waypoints to {destination}")
     return _waypoints
 
+
 def calculate_distance(lat1, lng1, lat2, lng2):
     """Calculate distance between two coordinates in miles"""
     # Simplified distance calculation
     lat_diff = lat2 - lat1
     lng_diff = lng2 - lng1
     return math.sqrt(lat_diff**2 + lng_diff**2) * 69  # Rough miles conversion
+
 
 def get_navigation_instruction(current_waypoint_idx):
     """Generate turn-by-turn instructions"""
@@ -99,8 +109,9 @@ def get_navigation_instruction(current_waypoint_idx):
     
     return random.choice(instructions)
 
+
 async def simulate_autonomous_navigation():
-    """Simulate autonomous driving along the route"""
+    """Simulate autonomous driving along the GPS-style route"""
     global _current_lat, _current_lng, _route_progress, _simulated_speed, _current_waypoint
     
     if not _route_active or not _waypoints:
@@ -154,8 +165,53 @@ async def simulate_autonomous_navigation():
     
     return None
 
+
+async def simulate_grid_navigation():
+    """Simulate following grid-based waypoints from server A* planner."""
+    global _grid_route_active, _grid_current_index, _simulated_speed
+
+    if not _grid_route_active or not _grid_waypoints:
+        return None
+
+    total = len(_grid_waypoints)
+
+    # "Move" from one cell to the next based on time
+    elapsed = time.time() - _grid_start_time
+    target_index = int(elapsed * _grid_speed_cells_per_sec)
+
+    if target_index >= total:
+        target_index = total - 1
+
+    if target_index != _grid_current_index:
+        print(f"[NAV] Reached waypoint {target_index + 1}/{total}")
+        _grid_current_index = target_index
+
+    # Compute progress and fake speed
+    progress = _grid_current_index / max(1, total - 1)
+    _route_progress = progress  # reuse the same variable
+
+    # Simulate a speed (arbitrary units)
+    _simulated_speed = 20 + 10 * progress
+
+    current_wp = _grid_waypoints[_grid_current_index]
+    status = "navigating" if _grid_current_index < total - 1 else "arrived"
+
+    return {
+        "status": status,
+        "destination": f"grid:{current_wp.get('row')},{current_wp.get('col')}",
+        "current_lat": round(_current_lat, 6),
+        "current_lng": round(_current_lng, 6),
+        "distance_remaining": max(0, (total - 1 - _grid_current_index)),  # cells remaining
+        "eta_minutes": max(0, int((total - 1 - _grid_current_index) / max(0.1, _grid_speed_cells_per_sec * 60))),
+        "next_instruction": f"Head {current_wp.get('heading', 'E')} to cell ({current_wp.get('row')},{current_wp.get('col')})",
+        "route_progress": progress,
+        "current_speed": int(_simulated_speed),
+        "speed_limit": _route_settings.get("max_speed", 35) if _route_settings else 35,
+    }
+
+
 def start_autonomous_route(destination: str, settings: dict):
-    """Start autonomous navigation to destination"""
+    """Start autonomous navigation to destination (GPS-style mock route)"""
     global _route_active, _route_destination, _route_settings, _route_start_time, _current_waypoint, _route_progress
     
     _route_active = True
@@ -170,6 +226,7 @@ def start_autonomous_route(destination: str, settings: dict):
     print(f"[ROUTE] Started autonomous navigation to: {destination}")
     print(f"[ROUTE] Settings: {settings}")
 
+
 def stop_autonomous_route(reason: str = "user_request"):
     """Stop autonomous navigation"""
     global _route_active, _simulated_speed
@@ -178,6 +235,7 @@ def stop_autonomous_route(reason: str = "user_request"):
     _simulated_speed = 0.0
     
     print(f"[ROUTE] Stopped autonomous navigation - reason: {reason}")
+
 
 def apply_manual_control(speed: float, angle: float):
     """Simulate applying manual control values from joystick"""
@@ -188,7 +246,7 @@ def apply_manual_control(speed: float, angle: float):
         print("[BLOCKED] Manual control blocked - emergency stop active")
         return False
     
-    if _route_active:
+    if _route_active or _grid_route_active:
         print("[BLOCKED] Manual control blocked - autonomous mode active")
         return False
     
@@ -218,9 +276,10 @@ def apply_manual_control(speed: float, angle: float):
     print(f"[MOTORS] PWM={motor_pwm} {motor_direction}, Servo={servo_position}μs, Differential L={left_pwm} R={right_pwm}")
     return True
 
+
 def emergency_stop():
     """Immediate emergency stop - highest priority"""
-    global _current_speed, _current_angle, _emergency_active, _last_emergency_time, _route_active, _simulated_speed
+    global _current_speed, _current_angle, _emergency_active, _last_emergency_time, _route_active, _simulated_speed, _grid_route_active
     
     _emergency_active = True
     _last_emergency_time = time.time()
@@ -230,6 +289,7 @@ def emergency_stop():
     # Stop autonomous navigation
     if _route_active:
         stop_autonomous_route("emergency_stop")
+    _grid_route_active = False
     _simulated_speed = 0.0
     
     print("=" * 60)
@@ -240,21 +300,33 @@ def emergency_stop():
     print("Autonomous navigation STOPPED")
     print("=" * 60)
 
+
 def clear_emergency():
     """Clear emergency mode - restore normal operation"""
     global _emergency_active
     _emergency_active = False
     print("✅ Emergency mode cleared - normal operation restored")
 
+
 async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_index: int = 0):
     async with websockets.connect(uri) as ws:
         print(f"Connected to {uri} as {device_id}")
         # send handshake
-        handshake = {"role": "pi", "device_id": device_id, "action": "handshake", "payload": {"info": "pi-sim"}}
+        handshake = {
+            "role": "pi",
+            "device_id": device_id,
+            "action": "handshake",
+            "payload": {"info": "pi-sim"},
+        }
         await ws.send(json.dumps(handshake))
 
         # start receiver task
         async def receiver():
+            # DECLARE ALL GLOBALS USED/MODIFIED IN THIS FUNCTION HERE
+            global _grid_route_active, _grid_waypoints, _grid_current_index, _grid_start_time
+            global _current_speed, _current_angle, _emergency_active, _last_emergency_time
+            global _route_active, _simulated_speed
+
             try:
                 async for message in ws:
                     try:
@@ -305,7 +377,7 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                                 "motor_pwm": int(abs(_current_speed) * 255) if success else 0,
                                 "servo_position": 1500 + int(_current_angle * 500) if success else 1500,
                                 "emergency_active": _emergency_active,
-                                "route_active": _route_active,
+                                "route_active": _route_active or _grid_route_active,
                                 "blocked": not success
                             }, 
                             "ts": time.time()
@@ -344,6 +416,9 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     elif act == "control" and ptype == "auto_route_stop":
                         reason = payload.get("reason", "user_request")
                         stop_autonomous_route(reason)
+                        # also stop grid route, if any
+                        _grid_route_active = False
+
                         ack = {
                             "role": "pi",
                             "device_id": device_id,
@@ -389,6 +464,47 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                         }
                         await ws.send(json.dumps(ack))
                         
+                    elif act == "control" and ptype == "execute_route":
+                        # New: receive grid waypoints from server A* planner
+                        wps = payload.get("waypoints") or []
+                        goal_name = payload.get("goal_name", "Unknown")
+
+                        # DEBUG LOG: raw waypoints from server
+                        try:
+                            print("[ROUTE][DEBUG] Raw waypoints payload from server:")
+                            print(f"  type: {type(wps)}, len: {len(wps)}")
+                            for i, wp in enumerate(wps):
+                                print(f"    #{i}: {wp}")
+                        except Exception as e:
+                            print(f"[ROUTE][DEBUG] Error while printing waypoints: {e}")
+
+                        if not wps:
+                            print("[ROUTE] Received execute_route with empty waypoints")
+                            _grid_route_active = False
+                            _grid_waypoints = []
+                        else:
+                            _grid_route_active = True
+                            _grid_waypoints = wps
+                            _grid_current_index = 0
+                            _grid_start_time = time.time()
+                            print(f"[ROUTE] Grid route received: {len(_grid_waypoints)} waypoints to {goal_name}")
+                            print(f"[ROUTE] First WP: {_grid_waypoints[0]}, Last WP: {_grid_waypoints[-1]}")
+
+                        # ack back to server/frontend
+                        ack = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "route_ack",
+                            "payload": {
+                                "status": "route_started" if _grid_route_active else "route_invalid",
+                                "destination": goal_name,
+                                "waypoint_count": len(_grid_waypoints)
+                            },
+                            "ts": time.time()
+                        }
+                        await ws.send(json.dumps(ack))
+                        
                     else:
                         # log other messages
                         print("RECV PKT:", pkt)
@@ -404,44 +520,48 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
             cap = None
 
         try:
+            # <<< ADD THIS GLOBAL DECLARATION >>>
+            global _grid_route_active, _route_active, _simulated_speed, _current_speed
+            # ------------------------------------
             interval = 1.0 / max(0.01, fps)
             while True:
                 start = time.time()
-                
+
                 # Send camera frame if available
                 if cap:
                     ret, frame = cap.read()
                     if ret:
-                        # encode as JPEG
-                        ok, enc = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                        ok, enc = cv2.imencode(
+                            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+                        )
                         if ok:
-                            b64 = base64.b64encode(enc.tobytes()).decode('ascii')
+                            b64 = base64.b64encode(enc.tobytes()).decode("ascii")
                             payload = {
                                 "frame_b64": b64,
                                 "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                                 "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                                "encoding": "jpeg"
+                                "encoding": "jpeg",
                             }
                             packet = {
-                                "role": "pi", 
-                                "device_id": device_id, 
-                                "action": "telemetry", 
-                                "type": "camera_frame", 
-                                "payload": payload, 
-                                "ts": time.time()
+                                "role": "pi",
+                                "device_id": device_id,
+                                "action": "telemetry",
+                                "type": "camera_frame",
+                                "payload": payload,
+                                "ts": time.time(),
                             }
                             await ws.send(json.dumps(packet))
-                
+
                 # Send periodic status update (enhanced with route status)
                 status_payload = {
-                    "speed": _simulated_speed if _route_active else _current_speed,
+                    "speed": _simulated_speed if (_route_active or _grid_route_active) else _current_speed,
                     "angle": _current_angle,
                     "battery": 85.2,
                     "temperature": 42.1,
                     "connected": True,
                     "emergency_active": _emergency_active,
-                    "route_active": _route_active,
-                    "last_emergency": _last_emergency_time if _emergency_active else None
+                    "route_active": _route_active or _grid_route_active,
+                    "last_emergency": _last_emergency_time if _emergency_active else None,
                 }
                 status_packet = {
                     "role": "pi",
@@ -449,11 +569,11 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     "action": "telemetry",
                     "type": "status",
                     "payload": status_payload,
-                    "ts": time.time()
+                    "ts": time.time(),
                 }
                 await ws.send(json.dumps(status_packet))
-                
-                # Send route status if navigation is active
+
+                # Send route status if GPS-style navigation is active
                 if _route_active:
                     route_status = await simulate_autonomous_navigation()
                     if route_status:
@@ -463,18 +583,36 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             "action": "telemetry",
                             "type": "route_status",
                             "payload": route_status,
-                            "ts": time.time()
+                            "ts": time.time(),
                         }
                         await ws.send(json.dumps(route_packet))
-                        
+
                         # Check if route completed
                         if route_status["status"] == "arrived":
                             stop_autonomous_route("destination_reached")
-                
+
+                # Send route status if grid-based navigation is active
+                if _grid_route_active:
+                    grid_status = await simulate_grid_navigation()
+                    if grid_status:
+                        grid_packet = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "route_status",
+                            "payload": grid_status,
+                            "ts": time.time(),
+                        }
+                        await ws.send(json.dumps(grid_packet))
+
+                        if grid_status["status"] == "arrived":
+                            print("[ROUTE] Grid route completed.")
+                            _grid_route_active = False
+
                 # sleep remaining time
                 elapsed = time.time() - start
                 await asyncio.sleep(max(0, interval - elapsed))
-                
+
         except KeyboardInterrupt:
             print("\nShutting down pi simulator...")
         finally:

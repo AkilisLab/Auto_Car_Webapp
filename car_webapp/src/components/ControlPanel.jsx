@@ -188,6 +188,34 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     following_distance: "safe" // "close" | "safe" | "far"
   });
 
+  // --- NEW: helper to send planner request to backend ---
+  const sendRouteRequest = React.useCallback(
+    ({ start, goal, destinationText }) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!start || !goal) return;
+
+      const msg = {
+        role: "frontend",
+        device_id: "control-panel",
+        action: "control",
+        type: "request_route",
+        target: "pi-01", // keep this as your current target
+        payload: {
+          // The backend handler in server.py will look at "destination"
+          // and optional "start_location"
+          destination: goal,          // [row, col]
+          start_location: start,      // [row, col]
+          destination_text: destinationText || "",
+        },
+        ts: Date.now() / 1000,
+      };
+      console.log("Sending route request:", msg);
+      ws.send(JSON.stringify(msg));
+    },
+    [ws]
+  );
+  // ------------------------------------------------------
+
   // WebSocket connection setup
   useEffect(() => {
     const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
@@ -309,39 +337,76 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
     };
   }, []);
 
-  // Send control messages when joystick values change (blocked during emergency)
+  // Send control messages when joystick values change (BLOCKED during auto & emergency)
   useEffect(() => {
-    if (ws && ws.readyState === WebSocket.OPEN && mode === "manual" && !emergencyStatus.active) {
+    if (
+      ws &&
+      ws.readyState === WebSocket.OPEN &&
+      mode === "manual" &&
+      !emergencyStatus.active
+    ) {
       const controlMsg = {
         role: "frontend",
         device_id: "control-panel",
         action: "control",
         type: "manual_drive",
         target: "pi-01", // TODO: make this configurable
-        payload: { 
-          speed: accel, 
-          angle: steer 
+        payload: {
+          speed: accel,
+          angle: steer,
         },
-        ts: Date.now() / 1000
+        ts: Date.now() / 1000,
       };
       ws.send(JSON.stringify(controlMsg));
     }
   }, [accel, steer, ws, mode, emergencyStatus.active]);
 
+  // --- NEW: wrapper around onStatusUpdate to hook auto_route_request ---
+  const handleStatusUpdate = React.useCallback(
+    (nextStatus) => {
+      // If auto mode requested a route (from AutoControls or similar),
+      // immediately trigger planner request to backend.
+      if (
+        mode === "auto" &&
+        nextStatus?.auto_route_request &&
+        nextStatus.auto_route_request.start &&
+        nextStatus.auto_route_request.goal
+      ) {
+        const { start, goal } = nextStatus.auto_route_request;
+        const destinationText = nextStatus.destination || "";
+        sendRouteRequest({ start, goal, destinationText });
+
+        // Mark route as "planning" locally
+        setRouteActive(true);
+        setRouteStatus((prev) => ({
+          ...prev,
+          status: "planning",
+          destination: destinationText,
+        }));
+      }
+
+      // Forward to parent Dashboard / vehicleStatus state
+      onStatusUpdate && onStatusUpdate(nextStatus);
+    },
+    [mode, onStatusUpdate, sendRouteRequest]
+  );
+  // ---------------------------------------------------------------
+
+  // NOTE: replace direct uses of onStatusUpdate in this file with handleStatusUpdate
   useEffect(() => {
-    onStatusUpdate && onStatusUpdate({ ...vehicleStatus, temperature: temp });
+    handleStatusUpdate({ ...vehicleStatus, temperature: temp });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [temp]);
 
   // send pwm & accel/steer updates merged into vehicleStatus whenever accel or steer changes
   useEffect(() => {
-    const pwm = emergencyStatus.active ? 0 : Math.round(Math.abs(accel) * 255); // 0 during emergency
-    onStatusUpdate && onStatusUpdate({ 
-      ...vehicleStatus, 
-      acceleration: emergencyStatus.active ? 0 : accel, 
-      steering: emergencyStatus.active ? 0 : steer, 
+    const pwm = emergencyStatus.active ? 0 : Math.round(Math.abs(accel) * 255);
+    handleStatusUpdate({
+      ...vehicleStatus,
+      acceleration: emergencyStatus.active ? 0 : accel,
+      steering: emergencyStatus.active ? 0 : steer,
       pwm,
-      emergency: emergencyStatus.active
+      emergency: emergencyStatus.active,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accel, steer, emergencyStatus.active]);
@@ -374,13 +439,13 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       timestamp: Date.now()
     }));
     
-    onStatusUpdate && onStatusUpdate({ 
-      ...vehicleStatus, 
-      emergency: true, 
-      speed: 0, 
-      acceleration: 0, 
-      steering: 0, 
-      pwm: 0 
+    handleStatusUpdate({
+      ...vehicleStatus,
+      emergency: true,
+      speed: 0,
+      acceleration: 0,
+      steering: 0,
+      pwm: 0,
     });
     
     // Visual feedback
@@ -404,25 +469,64 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   }
 
   // Route control functions
-  function handleStartRoute() {
-    if (ws && ws.readyState === WebSocket.OPEN && route && !emergencyStatus.active) {
-      const routeMsg = {
-        role: "frontend",
-        device_id: "control-panel",
-        action: "control",
-        type: "auto_route_start",
-        target: "pi-01", // TODO: make this configurable
-        payload: {
-          destination: route,
-          route_type: routeSettings.route_type,
-          max_speed: routeSettings.max_speed,
-          following_distance: routeSettings.following_distance
-        },
-        ts: Date.now() / 1000
-      };
-      ws.send(JSON.stringify(routeMsg));
-      console.log("Sent route start command:", routeMsg);
+  function parseCoordinateRoute(input) {
+    // Expected format: "r1,c1 -> r2,c2"
+    if (!input) return null;
+    const parts = input.split("->");
+    if (parts.length !== 2) return null;
+
+    const startRaw = parts[0].trim();
+    const goalRaw = parts[1].trim();
+
+    const startParts = startRaw.split(",").map((s) => s.trim());
+    const goalParts = goalRaw.split(",").map((s) => s.trim());
+    if (startParts.length !== 2 || goalParts.length !== 2) return null;
+
+    const sr = Number(startParts[0]);
+    const sc = Number(startParts[1]);
+    const gr = Number(goalParts[0]);
+    const gc = Number(goalParts[1]);
+
+    if (
+      Number.isNaN(sr) ||
+      Number.isNaN(sc) ||
+      Number.isNaN(gr) ||
+      Number.isNaN(gc)
+    ) {
+      return null;
     }
+
+    return {
+      start: [sr, sc],
+      goal: [gr, gc],
+    };
+  }
+
+  function handleStartRoute() {
+    if (!route || emergencyStatus.active) return;
+
+    const parsed = parseCoordinateRoute(route);
+    if (!parsed) {
+      console.warn(
+        'Invalid route format. Use "row1,col1 -> row2,col2", e.g. "1,1 -> 4,4".'
+      );
+      return;
+    }
+
+    // Use the same planner request path as AutoControls
+    sendRouteRequest({
+      start: parsed.start,
+      goal: parsed.goal,
+      destinationText: route,
+    });
+
+    // Mark route as planning locally
+    setRouteActive(true);
+    setRouteStatus((prev) => ({
+      ...prev,
+      status: "planning",
+      destination: route,
+    }));
   }
 
   function handleStopRoute() {
@@ -745,7 +849,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
             onChange={({ value }) => {
               if (!emergencyStatus.active) {
                 setSteer(value);
-                onStatusUpdate && onStatusUpdate({ ...vehicleStatus, steering: value });
+                handleStatusUpdate({ ...vehicleStatus, steering: value });
               }
             }}
             valueDisplay={`${Math.round(steer * 45)}°`}

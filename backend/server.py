@@ -3,7 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import time
+import os
 from typing import Dict, Any
+
+# Import your planner
+import Astar_planner
 
 app = FastAPI(title="WebSocket Demo Server")
 app.add_middleware(
@@ -14,6 +18,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# --- NAVIGATION SETUP ---
+# Load the grid map once on startup
+MAP_FILE = "test_grid.txt" # Change to "data/grid.txt" when ready
+NAV_GRID = None
+POI_MAP = {
+    "kitchen": (1, 1),
+    "living_room": (4, 4),
+    "garage": (0, 0)
+}
+
+try:
+    if os.path.exists(MAP_FILE):
+        NAV_GRID = Astar_planner.read_grid(MAP_FILE)
+        print(f"Navigation: Loaded map from {MAP_FILE} ({len(NAV_GRID)}x{len(NAV_GRID[0])})")
+    else:
+        print(f"Navigation Warning: Map file {MAP_FILE} not found.")
+except Exception as e:
+    print(f"Navigation Error: Failed to load map: {e}")
+# ------------------------
 
 class ConnectionManager:
     """
@@ -268,7 +292,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if src in manager.devices:
                     manager.devices[src]["last_seen"] = time.time()
                     if payload:
-                        manager.devices[src]["meta"].update({"last_payload": payload})
+                        # If payload has location/telemetry, it gets saved here
+                        manager.devices[src]["meta"].update(payload)
 
             # Camera frames telemetry from Pi -> forward to frontends
             if act == "telemetry" and ptype == "camera_frame" and role == "pi":
@@ -295,17 +320,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 target = packet.get("target") or payload.get("target")
                 envelope = {"from": src, "action": "control", "type": ptype, "payload": payload, "ts": ts}
                 
-                # EMERGENCY STOP - highest priority, broadcast to ALL Pi devices
+                # EMERGENCY STOP - highest priority
                 if ptype == "emergency_stop":
                     success_count, total_count = await manager.emergency_broadcast_to_pis(envelope)
-                    # Immediate feedback to frontend
                     await manager.send_json({
                         "status": "emergency_sent", 
                         "devices_reached": success_count, 
                         "total_devices": total_count,
                         "ts": time.time()
                     }, websocket)
-                    # Notify all frontends about emergency broadcast
                     await manager.broadcast_to_frontends({
                         "action": "emergency_broadcast",
                         "from": src,
@@ -313,6 +336,84 @@ async def websocket_endpoint(websocket: WebSocket):
                         "ts": time.time()
                     })
                     continue
+
+                # --- NEW: HYBRID NAVIGATION HANDLER ---
+                elif ptype == "request_route":
+                    dest_raw = payload.get("destination")
+                    target_device = target
+                    
+                    if not target_device or target_device not in manager.devices:
+                        await manager.send_json({"error": "Target device not found or offline"}, websocket)
+                        continue
+
+                    # 1. Determine Start Position (from device telemetry)
+                    device_meta = manager.devices[target_device]["meta"]
+                    # Expecting device to report "location": [row, col] in its telemetry
+                    start_pos = device_meta.get("location")
+                    
+                    # Fallback: if device hasn't reported location, check payload or default
+                    if not start_pos:
+                        start_pos = payload.get("start_location", (0, 0)) 
+
+                    # 2. Determine Goal Position
+                    goal_pos = None
+                    if isinstance(dest_raw, str) and dest_raw.lower() in POI_MAP:
+                        goal_pos = POI_MAP[dest_raw.lower()]
+                    elif isinstance(dest_raw, list) and len(dest_raw) == 2:
+                        goal_pos = tuple(dest_raw)
+                    
+                    if not goal_pos:
+                         await manager.send_json({"error": f"Unknown destination: {dest_raw}"}, websocket)
+                         continue
+
+                    # 3. Calculate Path
+                    if NAV_GRID:
+                        try:
+                            # Ensure inputs are integers for the planner
+                            start_node = (int(start_pos[0]), int(start_pos[1]))
+                            goal_node = (int(goal_pos[0]), int(goal_pos[1]))
+                            
+                            print(f"Planning route for {target_device}: {start_node} -> {goal_node}")
+                            waypoints = Astar_planner.plan_with_headings(NAV_GRID, start_node, goal_node)
+                            
+                            if not waypoints:
+                                await manager.send_json({"error": "No path found (blocked or invalid)"}, websocket)
+                                continue
+
+                            print(f"[SERVER] A* path length: {len(waypoints)}")
+                            print(f"[SERVER] First waypoint: {waypoints[0] if waypoints else None}")
+                            print(f"[SERVER] Last  waypoint: {waypoints[-1] if waypoints else None}")
+
+                            # 4. Send Instructions to Pi (Execute)
+                            route_command = {
+                                "from": "server",
+                                "action": "control",
+                                "type": "execute_route",
+                                "payload": {
+                                    "waypoints": waypoints,
+                                    "goal_name": str(dest_raw)
+                                }
+                            }
+                            await manager.send_to_device(target_device, route_command)
+
+                            # 5. Send Confirmation to Frontend (Visualize)
+                            await manager.send_json({
+                                "status": "route_calculated",
+                                "target": target_device,
+                                "payload": {
+                                    "waypoints": waypoints,
+                                    "start": start_node,
+                                    "goal": goal_node
+                                }
+                            }, websocket)
+
+                        except Exception as e:
+                            print(f"Planning error: {e}")
+                            await manager.send_json({"error": f"Planning failed: {str(e)}"}, websocket)
+                    else:
+                        await manager.send_json({"error": "Server has no map loaded"}, websocket)
+                    continue
+                # --------------------------------------
                 
                 # ROUTE CONTROL MESSAGES - route start/stop commands
                 elif ptype in ["auto_route_start", "auto_route_stop"]:
