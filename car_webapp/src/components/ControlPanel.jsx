@@ -655,6 +655,22 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
                   if (!emergencyStatus.active) {
                     console.log("Quick command:", q);
                     setVoiceActive(true);
+                    // Send quick command over WS to backend -> client
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                      const msg = {
+                        role: "frontend",
+                        device_id: "control-panel",
+                        action: "control",
+                        type: "quick_command",
+                        target: "pi-01",
+                        payload: { text: q, device_id: "pi-01" },
+                        ts: Date.now() / 1000,
+                      };
+                      console.log("Sending quick_command:", msg);
+                      ws.send(JSON.stringify(msg));
+                    } else {
+                      console.warn("WebSocket not connected; cannot send quick_command");
+                    }
                   }
                 }}
               >

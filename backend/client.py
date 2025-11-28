@@ -11,6 +11,8 @@ import cv2
 import websockets
 import math
 import random
+import os
+import requests
 
 # simulator state
 _current_speed = 0.0
@@ -38,6 +40,9 @@ _grid_waypoints = []  # list of dicts: {'row', 'col', 'heading'}
 _grid_current_index = 0
 _grid_start_time = 0.0
 _grid_speed_cells_per_sec = 0.5  # simulation speed across cells
+
+# AI server configuration
+AI_SERVER_URL = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8010")
 
 
 def generate_mock_route(destination: str):
@@ -383,6 +388,49 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             "ts": time.time()
                         }
                         await ws.send(json.dumps(ack))
+                    
+                    elif act == "control" and ptype == "quick_command":
+                        # Receive quick command text, forward to AI server /process/text, and emit telemetry with result
+                        qc_text = payload.get("text", "")
+                        print(f"[CLIENT] quick_command received from {src}: \"{qc_text}\"")
+
+                        # Acknowledge receipt immediately
+                        ack = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "quick_command_ack",
+                            "payload": {"received_text": qc_text},
+                            "ts": time.time(),
+                        }
+                        await ws.send(json.dumps(ack))
+
+                        # Call AI server for processing
+                        result_payload = {"input": qc_text, "response": None, "error": None}
+                        try:
+                            url = f"{AI_SERVER_URL.rstrip('/')}/process/text"
+                            r = requests.post(url, json={"text": qc_text}, timeout=10)
+                            r.raise_for_status()
+                            data = r.json()
+                            result_payload["response"] = data.get("response")
+                            # Mirror input from server if provided
+                            if data.get("input"):
+                                result_payload["input"] = data["input"]
+                            print(f"[CLIENT] AI response: {result_payload['response']}")
+                        except Exception as e:
+                            result_payload["error"] = str(e)
+                            print(f"[CLIENT][ERROR] AI server call failed: {e}")
+
+                        # Send command result telemetry back to backend/frontend
+                        result_msg = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "command_result",
+                            "payload": result_payload,
+                            "ts": time.time(),
+                        }
+                        await ws.send(json.dumps(result_msg))
                     
                     elif act == "control" and ptype == "auto_route_start":
                         destination = payload.get("destination", "Unknown")

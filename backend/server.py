@@ -414,6 +414,27 @@ async def websocket_endpoint(websocket: WebSocket):
                         await manager.send_json({"error": "Server has no map loaded"}, websocket)
                     continue
                 # --------------------------------------
+
+                # QUICK COMMAND - log and forward to target device
+                elif ptype == "quick_command":
+                    qc_text = (payload or {}).get("text", "")
+                    print(f"[SERVER] quick_command from {src} -> target={target} text=\"{qc_text}\"")
+                    if not qc_text:
+                        await manager.send_json({"error": "missing quick_command text"}, websocket)
+                        continue
+
+                    if target == "all" or payload.get("broadcast", False):
+                        await manager.broadcast_to_pis(envelope)
+                        await manager.send_json({"status": "quick_command_sent", "target": "all", "text": qc_text}, websocket)
+                    elif target:
+                        ok = await manager.send_to_device(target, envelope)
+                        if not ok:
+                            await manager.send_json({"error": "target offline", "target": target}, websocket)
+                        else:
+                            await manager.send_json({"status": "quick_command_sent", "target": target, "text": qc_text}, websocket)
+                    else:
+                        await manager.send_json({"error": "missing target for quick_command"}, websocket)
+                    continue
                 
                 # ROUTE CONTROL MESSAGES - route start/stop commands
                 elif ptype in ["auto_route_start", "auto_route_stop"]:

@@ -1,6 +1,6 @@
-# FastAPI WebSocket demo (desktop server + laptop client)
+# Backend — FastAPI WebSocket Hub
 
-This small example shows how to run a FastAPI WebSocket server on one machine (desktop) and connect to it from another machine (laptop) on the same network.
+Routes messages between frontends and Pi clients, and includes a simple A* grid planner.
 
 Files
 - `server.py` - FastAPI app exposing a `/ws` WebSocket endpoint and a POST `/broadcast` endpoint.
@@ -35,17 +35,20 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 hostname -I
 ```
 
-Quick start (laptop/client)
+Pi simulator client
 
 1. Ensure Python and the same dependencies are installed (or reuse a venv).
 
 2. Run the client and point it to the server's IP (replace X.X.X.X):
 
 ```bash
-python client.py ws://X.X.X.X:8000/ws
+python client.py ws://X.X.X.X:8000/ws pi-01 5
 ```
 
-Type messages and press ENTER to send. Incoming messages from the server will be printed.
+Environment for AI server (optional):
+```bash
+export AI_SERVER_URL=http://<ai_host>:8010
+```
 
 Broadcast example (server-side send to all connected clients)
 
@@ -55,9 +58,25 @@ From any machine that can reach the server's HTTP port you can run:
 python broadcast_client.py http://X.X.X.X:8000 "Hello from desktop"
 ```
 
+Quick commands
+- Frontend emits:
+	```json
+	{"role":"frontend","action":"control","type":"quick_command","target":"pi-01","payload":{"text":"Hey AutoDrive, navigate home"}}
+	```
+- Server logs and forwards to the target Pi. Ack back to the sending frontend:
+	`{ "status": "quick_command_sent", "target": "pi-01", "text": "..." }`
+- Pi posts to AI server `/process/text` and sends telemetry:
+	`{ "action":"telemetry", "type":"command_result", "payload": {"input":"...","response":"...","error":null} }`
+- Server broadcasts telemetry to all frontends.
+
+Logs to expect
+- `[SERVER] quick_command from <frontend> -> target=pi-01 text="..."`
+- `[CLIENT] quick_command received from <src>: "..."`
+- `[CLIENT] AI response: ...`
+
 Notes
-- The server accepts all origins by default (CORS enabled for convenience). For production, restrict origins.
-- The `/broadcast` route expects JSON `{"message": "..."}` and will forward the string to all connected websocket clients.
+- CORS allows all origins for convenience; restrict in production.
+- Planner expects `test_grid.txt` to be present; update `MAP_FILE` if needed.
 
 If you'd like, I can:
 - Add an HTML demo page that connects from a browser.
