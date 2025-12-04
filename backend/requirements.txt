@@ -1,4 +1,7 @@
+# Backend requirements (excluding client.py)
 fastapi
 uvicorn[standard]
 websockets
 requests
+pydantic
+shutil

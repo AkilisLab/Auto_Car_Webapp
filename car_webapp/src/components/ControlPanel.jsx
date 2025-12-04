@@ -158,6 +158,20 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   const [route, setRoute] = useState("");
   const [routeActive, setRouteActive] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
+  // --- Microphone control logic ---
+  const deviceId = "pi-01";
+  const sendMicrophoneEvent = (eventType) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const msg = {
+        action: eventType,
+        payload: { device_id: deviceId },
+      };
+      console.log(`[VOICE] Sending ${eventType}:`, msg);
+      ws.send(JSON.stringify(msg));
+    } else {
+      console.log(`[VOICE] WebSocket not ready for ${eventType}`);
+    }
+  };
   const [ws, setWs] = useState(null);
   const [emergencyStatus, setEmergencyStatus] = useState({
     active: false,
@@ -604,7 +618,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   if (mode === "audio") {
     const quickCommands = [
       "Hey AutoDrive, navigate home",
-      "Hey AutoDrive, set cruise control",
+      "Hey AutoDrive, play shape of you",
       "Hey AutoDrive, find parking",
       "Hey AutoDrive, emergency stop",
     ];
@@ -621,7 +635,10 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
 
         <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
           <Button
-            onClick={() => setVoiceActive(true)}
+            onClick={() => {
+              setVoiceActive(true);
+              sendMicrophoneEvent("microphone_open");
+            }}
             disabled={emergencyStatus.active}
             style={{ 
               background: emergencyStatus.active ? "#666" : "#14a354", 
@@ -636,7 +653,10 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
           </Button>
 
           <Button
-            onClick={() => setVoiceActive(false)}
+            onClick={() => {
+              setVoiceActive(false);
+              sendMicrophoneEvent("microphone_close");
+            }}
             style={{ background: "#c62828", color: "#fff", flex: 1, height: 52, fontWeight: 700 }}
             aria-label="Mute"
           >

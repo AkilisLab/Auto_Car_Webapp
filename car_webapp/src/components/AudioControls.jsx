@@ -1,42 +1,13 @@
-import React from "react";
+import React, { useRef } from "react";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Mic, MicOff, Volume2, VolumeX, MessageSquare } from "lucide-react";
 import { motion } from "framer-motion";
 
-export default function AudioControls({ status, onUpdate }) {
-  const [isListening, setIsListening] = React.useState(false);
+export default function AudioControls({ status, onUpdate, deviceId = "pi-01" }) {
   const [isMuted, setIsMuted] = React.useState(false);
   const [lastCommand, setLastCommand] = React.useState("Say 'Hey AutoDrive' to start");
-
-  const startListening = () => {
-    setIsListening(true);
-    setLastCommand("Listening for command...");
-    
-    // Simulate voice recognition
-    setTimeout(() => {
-      const commands = [
-        { text: "Navigate to home", action: () => onUpdate({ ...status, destination: "Home", speed: 45 }) },
-        { text: "Set speed to 65 mph", action: () => onUpdate({ ...status, speed: 65 }) },
-        { text: "Increase temperature", action: () => onUpdate({ ...status, temperature: (status?.temperature || 72) + 2 }) },
-        { text: "Decrease temperature", action: () => onUpdate({ ...status, temperature: (status?.temperature || 72) - 2 }) },
-        { text: "Stop the car", action: () => onUpdate({ ...status, speed: 0, steering_angle: 0 }) },
-      ];
-      const randomCommand = commands[Math.floor(Math.random() * commands.length)];
-      
-      setLastCommand(`Command received: "${randomCommand.text}"`);
-      randomCommand.action(); // Execute the action
-      setIsListening(false);
-      
-    }, 3000);
-  };
-
-  const stopListening = () => {
-    setIsListening(false);
-    setLastCommand("Voice recognition stopped");
-  };
-
   const toggleMute = () => {
     setIsMuted(!isMuted);
   };

@@ -315,6 +315,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_frontends(out)
                 continue
 
+            # Frontend microphone control messages -> route to target pi(s)
+            if act in ["microphone_open", "microphone_close"] and role == "frontend":
+                # Forward microphone control to target device (default: pi-01)
+                target = packet.get("target") or payload.get("device_id") or "pi-01"
+                envelope = {
+                    "from": src,
+                    "action": "control",
+                    "type": act,
+                    "payload": payload,
+                    "ts": ts or time.time(),
+                }
+                ok = await manager.send_to_device(target, envelope)
+                if not ok:
+                    await manager.send_json({"error": "target offline", "target": target}, websocket)
+                else:
+                    await manager.send_json({"status": f"{act}_sent", "target": target}, websocket)
+                continue
+
             # Frontend control messages -> route to target pi(s)
             elif act == "control" and role == "frontend":
                 target = packet.get("target") or payload.get("target")

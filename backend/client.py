@@ -13,6 +13,10 @@ import math
 import random
 import os
 import requests
+try:
+    import spotify  # local module moved next to client
+except Exception:
+    spotify = None
 
 # simulator state
 _current_speed = 0.0
@@ -326,7 +330,74 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
         await ws.send(json.dumps(handshake))
 
         # start receiver task
+        # --- Microphone streaming state ---
+        mic_streaming = False
+        mic_task = None
+
+        # Siri-style: record audio to buffer, send on close
+        import sounddevice as sd
+        import numpy as np
+        import requests
+        import tempfile
+        samplerate = 16000
+        audio_buffer = []
+        recording_stream = None
+
+        def audio_callback(indata, frames, time_info, status):
+            audio_buffer.append(indata.copy())
+
+        async def start_recording():
+            nonlocal recording_stream, audio_buffer
+            print("[MIC] Microphone recording started (Siri-style)")
+            audio_buffer = []
+            recording_stream = sd.InputStream(samplerate=samplerate, channels=1, dtype='int16', callback=audio_callback)
+            recording_stream.start()
+
+        async def stop_and_send_recording():
+            nonlocal recording_stream, audio_buffer
+            print("[MIC] Microphone recording stopped, sending to AI server")
+            if recording_stream:
+                recording_stream.stop()
+                recording_stream.close()
+                recording_stream = None
+            if not audio_buffer:
+                print("[MIC] No audio recorded.")
+                return
+            # Concatenate all chunks
+            audio_data = np.concatenate(audio_buffer, axis=0)
+            # Save to temp WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
+                import scipy.io.wavfile
+                scipy.io.wavfile.write(tmpfile.name, samplerate, audio_data)
+                tmpfile.flush()
+                # Send to AI server
+                try:
+                    url = f"{AI_SERVER_URL.rstrip('/')}/process/audio"
+                    with open(tmpfile.name, "rb") as f:
+                        files = {"file": ("audio.wav", f, "audio/wav")}
+                        resp = requests.post(url, files=files, timeout=15)
+                    if resp.ok:
+                        data = resp.json()
+                        msg = {
+                            "role": "pi",
+                            "device_id": device_id,
+                            "action": "telemetry",
+                            "type": "mic_transcript",
+                            "payload": data,
+                            "ts": time.time(),
+                        }
+                        await ws.send(json.dumps(msg))
+                        print(f"[MIC] Transcription sent: {data}")
+                    else:
+                        print(f"[MIC][ERROR] AI server response: {resp.status_code} {resp.text}")
+                except Exception as e:
+                    print(f"[MIC][ERROR] {e}")
+                finally:
+                    os.remove(tmpfile.name)
+
+
         async def receiver():
+            nonlocal mic_streaming, mic_task
             # DECLARE ALL GLOBALS USED/MODIFIED IN THIS FUNCTION HERE
             global _grid_route_active, _grid_waypoints, _grid_current_index, _grid_start_time
             global _current_speed, _current_angle, _emergency_active, _last_emergency_time
@@ -344,6 +415,15 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     ptype = pkt.get("type")
                     payload = pkt.get("payload", {})
                     src = pkt.get("from") or pkt.get("device_id")
+                    # Microphone open/close control
+                    if act == "control" and ptype == "microphone_open":
+                        print(f"[LOG] Received microphone_open event from {src} (payload: {payload})")
+                        await start_recording()
+                        continue
+                    elif act == "control" and ptype == "microphone_close":
+                        print(f"[LOG] Received microphone_close event from {src} (payload: {payload})")
+                        await stop_and_send_recording()
+                        continue
 
                     # EMERGENCY STOP - highest priority handler
                     if act == "control" and ptype == "emergency_stop":
@@ -431,6 +511,44 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             "ts": time.time(),
                         }
                         await ws.send(json.dumps(result_msg))
+
+                        # Optional: inline music trigger if command or AI response indicates
+                        music_query = None
+                        if qc_text.lower().startswith("play "):
+                            music_query = qc_text[5:].strip()
+                        elif qc_text.lower().startswith("spotify "):
+                            music_query = qc_text[8:].strip()
+                        elif result_payload.get("response") and isinstance(result_payload.get("response"), str):
+                            resp_txt = result_payload["response"].lower()
+                            # crude pattern: response begins with play_music: <query>
+                            if resp_txt.startswith("play_music:"):
+                                music_query = result_payload["response"].split(":",1)[1].strip()
+
+                        if music_query and spotify:
+                            try:
+                                print(f"[CLIENT][SPOTIFY] Triggering playback for query: {music_query}")
+                                play_result = spotify.play_music(music_query)
+                                # send a small telemetry note
+                                music_msg = {
+                                    "role": "pi",
+                                    "device_id": device_id,
+                                    "action": "telemetry",
+                                    "type": "music_play",
+                                    "payload": {"query": music_query, "status": play_result},
+                                    "ts": time.time(),
+                                }
+                                await ws.send(json.dumps(music_msg))
+                            except Exception as e:
+                                print(f"[CLIENT][SPOTIFY][ERROR] {e}")
+                                err_msg = {
+                                    "role": "pi",
+                                    "device_id": device_id,
+                                    "action": "telemetry",
+                                    "type": "music_play",
+                                    "payload": {"query": music_query, "error": str(e)},
+                                    "ts": time.time(),
+                                }
+                                await ws.send(json.dumps(err_msg))
                     
                     elif act == "control" and ptype == "auto_route_start":
                         destination = payload.get("destination", "Unknown")
