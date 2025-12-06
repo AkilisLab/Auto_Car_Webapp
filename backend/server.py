@@ -39,11 +39,13 @@ def udp_listener():
             if msg.get("action") == "announce":
                 device_id = msg.get("device_id")
                 info = msg.get("info", "")
+                listen_port = msg.get("listen_port", UDP_LISTEN_PORT)
                 discovered_devices[device_id] = {
                     "info": info,
                     "last_seen": time.time(),
                     "ip": addr[0],
-                    "status": "discovered"
+                    "status": "discovered",
+                    "listen_port": listen_port,
                 }
                 print(f"[SERVER] Discovered device: {device_id} from {addr[0]}")
         except Exception as e:
@@ -118,11 +120,22 @@ class ConnectionManager:
             })
 
     async def disconnect(self, websocket: WebSocket):
+        removed_devices: list[str] = []
         async with self.lock:
             self.unregistered.discard(websocket)
             for did, info in list(self.devices.items()):
                 if info.get("ws") is websocket:
                     del self.devices[did]
+                    removed_devices.append(did)
+        for did in removed_devices:
+            if did in discovered_devices:
+                discovered_devices[did]["status"] = "discovered"
+                discovered_devices[did]["last_seen"] = time.time()
+            await self.broadcast_to_frontends({
+                "action": "device_disconnected",
+                "device_id": did,
+                "ts": time.time()
+            })
 
     async def send_json(self, payload: dict, websocket: WebSocket):
         await websocket.send_text(json.dumps(payload))
@@ -178,6 +191,19 @@ class ConnectionManager:
             await self.disconnect(ws)
             return False
 
+    async def disconnect_device(self, device_id: str, reason: str = "frontend_request") -> bool:
+        async with self.lock:
+            info = self.devices.get(device_id)
+        if not info:
+            return False
+        ws = info["ws"]
+        try:
+            await ws.close(code=4001, reason=reason)
+        except Exception:
+            pass
+        await self.disconnect(ws)
+        return True
+
     async def broadcast_json(self, payload: dict):
         # broadcast to all connected websockets
         async with self.lock:
@@ -231,6 +257,7 @@ async def devices():
         all_devices[d] = discovered_devices[d].copy()
         all_devices[d]["device_id"] = d
         all_devices[d]["connected"] = False
+        all_devices[d]["available"] = bool(discovered_devices[d].get("ip"))
     for d in connected:
         did = d["device_id"]
         if did in all_devices:
@@ -239,6 +266,7 @@ async def devices():
             all_devices[did]["meta"] = d["meta"]
             all_devices[did]["last_seen"] = d["last_seen"]
             all_devices[did]["emergency"] = d["emergency"]
+            all_devices[did]["available"] = True
         else:
             all_devices[did] = {
                 "info": d.get("meta", {}),
@@ -248,7 +276,8 @@ async def devices():
                 "connected": True,
                 "role": d["role"],
                 "meta": d["meta"],
-                "emergency": d["emergency"]
+                "emergency": d["emergency"],
+                "available": True
             }
     return {"devices": list(all_devices.values())}
 
@@ -263,8 +292,17 @@ async def connect_device(request: Request):
     if not device_id or device_id not in discovered_devices:
         print(f"[SERVER] /connect_device error: device_id {device_id} not in discovered_devices {list(discovered_devices.keys())}")
         return {"status": "error", "message": "Device not found"}
+
+    # Disconnect any other connected Pi devices before connecting this one
+    current_devices = await manager.list_devices()
+    for info in current_devices:
+        if info["role"] == "pi" and info["device_id"] != device_id:
+            print(f"[SERVER] Disconnecting {info['device_id']} before connecting {device_id}")
+            await manager.disconnect_device(info["device_id"], reason="switch_device")
+
     # Send UDP connect command to device
     ip = discovered_devices[device_id]["ip"]
+    port = discovered_devices[device_id].get("listen_port", UDP_LISTEN_PORT)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     payload = json.dumps({
         "action": "connect",
@@ -272,14 +310,31 @@ async def connect_device(request: Request):
         "ws_url": ws_url
     }).encode()
     try:
-        sock.sendto(payload, (ip, UDP_LISTEN_PORT))
+        sock.sendto(payload, (ip, port))
         discovered_devices[device_id]["status"] = "connect_sent"
         discovered_devices[device_id]["last_connect"] = time.time()
-        print(f"[SERVER] Sent connect command to {device_id} at {ip}")
+        print(f"[SERVER] Sent connect command to {device_id} at {ip}:{port}")
         return {"status": "ok", "message": f"Connect command sent to {device_id}"}
     except Exception as e:
         print(f"[SERVER] Error sending connect command: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/disconnect_device")
+async def disconnect_device(request: Request):
+    body = await request.json()
+    device_id = body.get("device_id")
+    print(f"[SERVER] /disconnect_device called for device_id={device_id}")
+    if not device_id:
+        return {"status": "error", "message": "device_id required"}
+    disconnected = await manager.disconnect_device(device_id, reason="frontend_request")
+    if disconnected:
+        return {"status": "ok", "message": f"Disconnected {device_id}"}
+    # If device already offline, treat as success for idempotency
+    if device_id in discovered_devices:
+        discovered_devices[device_id]["status"] = "discovered"
+        discovered_devices[device_id]["last_seen"] = time.time()
+    return {"status": "ok", "message": f"{device_id} already disconnected"}
 
 
 @app.post("/control")

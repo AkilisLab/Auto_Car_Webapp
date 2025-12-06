@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/button';
@@ -73,12 +73,24 @@ export default function SettingsPage() {
 	const [selectedCar, setSelectedCar] = useState(null);
 	const [cars, setCars] = useState([]);
 	const [isLoading, setIsLoading] = useState(true);
+	const pollingRef = useRef(null);
+
+	const clearPolling = () => {
+		if (pollingRef.current) {
+			clearInterval(pollingRef.current);
+			pollingRef.current = null;
+		}
+	};
 
 	useEffect(() => {
-		fetchDevices();
+		fetchDevices(true);
+		return () => clearPolling();
 	}, []);
 
-	const fetchDevices = async () => {
+	const fetchDevices = async (withSpinner = false) => {
+		if (withSpinner) {
+			setIsLoading(true);
+		}
 		try {
 			const response = await fetch('http://localhost:8000/devices');
 			const data = await response.json();
@@ -90,18 +102,62 @@ export default function SettingsPage() {
 				image_url: defaultCarImage,
 				status: device.connected ? 'connected' : 'offline',
 				connected: device.connected,
+				available: device.available !== false,
 			}));
 			console.log('Mapped cars:', mappedCars);
 			setCars(mappedCars);
 		} catch (error) {
 			console.error('Error fetching devices:', error);
 		} finally {
-			setIsLoading(false);
+			if (withSpinner) {
+				setIsLoading(false);
+			}
+		}
+	};
+
+	const handleDisconnect = async (carToDisconnect) => {
+		console.log('Disconnecting car:', carToDisconnect);
+		clearPolling();
+		setSelectedCar(null);
+		try {
+			const response = await fetch('http://localhost:8000/disconnect_device', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ device_id: carToDisconnect.id })
+			});
+			console.log('Disconnect response:', response.status, response.ok);
+			setCars(prev => prev.map(car =>
+				car.id === carToDisconnect.id
+					? { ...car, status: 'offline', connected: false }
+					: car
+			));
+			await fetchDevices();
+		} catch (error) {
+			console.error('Error disconnecting device:', error);
 		}
 	};
 
 	const handleConnect = async (carToConnect) => {
+		if (carToConnect.status === 'connected') {
+			await handleDisconnect(carToConnect);
+			return;
+		}
+		if (carToConnect.status === 'connecting') {
+			console.log('Connect already in progress for', carToConnect.id);
+			return;
+		}
+		if (!carToConnect.available) {
+			console.warn('Device not available for connection:', carToConnect.id);
+			return;
+		}
 		console.log('Connecting to car:', carToConnect);
+		clearPolling();
+		setSelectedCar(null);
+		setCars(prev => prev.map(car =>
+			car.id === carToConnect.id
+				? { ...car, status: 'connecting' }
+				: { ...car, status: 'offline', connected: false }
+		));
 		try {
 			const response = await fetch('http://localhost:8000/connect_device', {
 				method: 'POST',
@@ -113,12 +169,7 @@ export default function SettingsPage() {
 			});
 			console.log('Connect response:', response.status, response.ok);
 			if (response.ok) {
-				// Update status to connecting
-				setCars(prev => prev.map(car =>
-					car.id === carToConnect.id ? { ...car, status: 'connecting' } : car
-				));
-				// Poll for connection status
-				const pollInterval = setInterval(async () => {
+				pollingRef.current = setInterval(async () => {
 					try {
 						const res = await fetch('http://localhost:8000/devices');
 						const data = await res.json();
@@ -126,9 +177,9 @@ export default function SettingsPage() {
 						console.log('Polling device status:', device);
 						if (device && device.connected) {
 							console.log('Device connected, navigating to Dashboard');
-							clearInterval(pollInterval);
+							clearPolling();
 							setCars(prev => prev.map(car =>
-								car.id === carToConnect.id ? { ...car, status: 'connected' } : car
+								car.id === carToConnect.id ? { ...car, status: 'connected', connected: true } : car
 							));
 							setSelectedCar(carToConnect);
 						}
@@ -138,9 +189,11 @@ export default function SettingsPage() {
 				}, 1000); // Poll every 1 second
 			} else {
 				console.error('Failed to connect device');
+				await fetchDevices();
 			}
 		} catch (error) {
 			console.error('Error connecting device:', error);
+			await fetchDevices();
 		}
 	};
 
@@ -234,15 +287,17 @@ export default function SettingsPage() {
 										<Button
 											className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold"
 											onClick={() => handleConnect(car)}
-											disabled={car.status === 'connected' || car.status === 'connecting'}
+											disabled={car.status === 'connecting' || (!car.available && !car.connected)}
 										>
 											{car.status === 'connecting' ? (
 												<Loader2 className="w-4 h-4 mr-2 animate-spin" />
+											) : car.status === 'connected' ? (
+												<WifiOff className="w-4 h-4 mr-2" />
 											) : (
 												<Zap className="w-4 h-4 mr-2" />
 											)}
 											{car.status === 'connected'
-												? 'Already Connected'
+												? 'Disconnect'
 												: car.status === 'connecting'
 												? 'Connecting...'
 												: 'Connect'}

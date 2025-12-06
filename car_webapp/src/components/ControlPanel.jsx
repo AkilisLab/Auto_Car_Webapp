@@ -151,7 +151,7 @@ function QuickCommandButton({ children, onClick }) {
   );
 }
 
-export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onStatusUpdate }) {
+export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onStatusUpdate, deviceId = "pi-01" }) {
   const [accel, setAccel] = useState(0);
   const [steer, setSteer] = useState(0);
   const [temp, setTemp] = useState(vehicleStatus.temperature || 72);
@@ -159,8 +159,12 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   const [routeActive, setRouteActive] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
   // --- Microphone control logic ---
-  const deviceId = "pi-01";
+  const hasActiveDevice = Boolean(deviceId);
   const sendMicrophoneEvent = (eventType) => {
+    if (!hasActiveDevice) {
+      console.warn(`[VOICE] No active device selected; skipping ${eventType}`);
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       const msg = {
         action: eventType,
@@ -205,6 +209,10 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   // --- NEW: helper to send planner request to backend ---
   const sendRouteRequest = React.useCallback(
     ({ start, goal, destinationText }) => {
+      if (!deviceId) {
+        console.warn("No active device; cannot send route request");
+        return;
+      }
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!start || !goal) return;
 
@@ -213,7 +221,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         device_id: "control-panel",
         action: "control",
         type: "request_route",
-        target: "pi-01", // keep this as your current target
+        target: deviceId,
         payload: {
           // The backend handler in server.py will look at "destination"
           // and optional "start_location"
@@ -226,7 +234,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       console.log("Sending route request:", msg);
       ws.send(JSON.stringify(msg));
     },
-    [ws]
+      [ws, deviceId]
   );
   // ------------------------------------------------------
 
@@ -357,14 +365,15 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       ws &&
       ws.readyState === WebSocket.OPEN &&
       mode === "manual" &&
-      !emergencyStatus.active
+      !emergencyStatus.active &&
+      hasActiveDevice
     ) {
       const controlMsg = {
         role: "frontend",
         device_id: "control-panel",
         action: "control",
         type: "manual_drive",
-        target: "pi-01", // TODO: make this configurable
+        target: deviceId,
         payload: {
           speed: accel,
           angle: steer,
@@ -373,7 +382,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
       };
       ws.send(JSON.stringify(controlMsg));
     }
-  }, [accel, steer, ws, mode, emergencyStatus.active]);
+  }, [accel, steer, ws, mode, emergencyStatus.active, deviceId, hasActiveDevice]);
 
   // --- NEW: wrapper around onStatusUpdate to hook auto_route_request ---
   const handleStatusUpdate = React.useCallback(
@@ -517,7 +526,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   }
 
   function handleStartRoute() {
-    if (!route || emergencyStatus.active) return;
+    if (!route || emergencyStatus.active || !hasActiveDevice) return;
 
     const parsed = parseCoordinateRoute(route);
     if (!parsed) {
@@ -544,13 +553,17 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   }
 
   function handleStopRoute() {
+    if (!hasActiveDevice) {
+      console.warn("No active device; skipping route stop command");
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       const stopMsg = {
         role: "frontend",
         device_id: "control-panel",
         action: "control",
         type: "auto_route_stop",
-        target: "pi-01",
+        target: deviceId,
         payload: {
           reason: "user_request"
         },
@@ -615,6 +628,16 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
   // build mode-specific inner content, then render a single Card that includes the shared emergency button
   let inner = null;
 
+  if (!hasActiveDevice) {
+    return (
+      <Card className="control-panel" shadow>
+        <div style={{ textAlign: "center", padding: "24px 12px", color: "#9fb0c2" }}>
+          Connect a device from the Settings page to enable vehicle controls.
+        </div>
+      </Card>
+    );
+  }
+
   if (mode === "audio") {
     const quickCommands = [
       "Hey AutoDrive, navigate home",
@@ -639,17 +662,17 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
               setVoiceActive(true);
               sendMicrophoneEvent("microphone_open");
             }}
-            disabled={emergencyStatus.active}
+            disabled={emergencyStatus.active || !hasActiveDevice}
             style={{ 
-              background: emergencyStatus.active ? "#666" : "#14a354", 
+              background: emergencyStatus.active || !hasActiveDevice ? "#666" : "#14a354", 
               flex: 1, 
               height: 52, 
               fontWeight: 700,
-              opacity: emergencyStatus.active ? 0.5 : 1 
+              opacity: emergencyStatus.active || !hasActiveDevice ? 0.5 : 1 
             }}
             aria-label="Talk"
           >
-            {emergencyStatus.active ? "Disabled" : "Talk"}
+            {emergencyStatus.active || !hasActiveDevice ? "Disabled" : "Talk"}
           </Button>
 
           <Button
@@ -657,10 +680,18 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
               setVoiceActive(false);
               sendMicrophoneEvent("microphone_close");
             }}
-            style={{ background: "#c62828", color: "#fff", flex: 1, height: 52, fontWeight: 700 }}
+            disabled={!hasActiveDevice}
+            style={{ 
+              background: !hasActiveDevice ? "#666" : "#c62828", 
+              color: "#fff", 
+              flex: 1, 
+              height: 52, 
+              fontWeight: 700,
+              opacity: !hasActiveDevice ? 0.5 : 1
+            }}
             aria-label="Mute"
           >
-            Mute
+            {hasActiveDevice ? "Mute" : "Disabled"}
           </Button>
         </div>
 
@@ -672,7 +703,7 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
               <QuickCommandButton
                 key={q}
                 onClick={() => {
-                  if (!emergencyStatus.active) {
+                  if (!emergencyStatus.active && hasActiveDevice) {
                     console.log("Quick command:", q);
                     setVoiceActive(true);
                     // Send quick command over WS to backend -> client
@@ -682,8 +713,8 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
                         device_id: "control-panel",
                         action: "control",
                         type: "quick_command",
-                        target: "pi-01",
-                        payload: { text: q, device_id: "pi-01" },
+                        target: deviceId,
+                        payload: { text: q, device_id: deviceId },
                         ts: Date.now() / 1000,
                       };
                       console.log("Sending quick_command:", msg);
@@ -798,19 +829,19 @@ export default function ControlPanel({ mode = "manual", vehicleStatus = {}, onSt
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <Button
             onClick={handleStartRoute}
-            disabled={emergencyStatus.active || !route || routeActive}
+            disabled={emergencyStatus.active || !route || routeActive || !hasActiveDevice}
             style={{ 
-              background: emergencyStatus.active ? "#666" : routeActive ? "#666" : "#1f57d8",
-              opacity: (emergencyStatus.active || routeActive) ? 0.5 : 1
+              background: emergencyStatus.active || !hasActiveDevice ? "#666" : routeActive ? "#666" : "#1f57d8",
+              opacity: (emergencyStatus.active || routeActive || !hasActiveDevice) ? 0.5 : 1
             }}
           >
-            {emergencyStatus.active ? "Disabled" : routeActive ? "Navigating" : "Start Route"}
+            {emergencyStatus.active ? "Disabled" : !hasActiveDevice ? "No Device" : routeActive ? "Navigating" : "Start Route"}
           </Button>
           <Button
             onClick={handleStopRoute}
-            disabled={!routeActive}
+            disabled={!routeActive || !hasActiveDevice}
             variant="ghost"
-            style={{ opacity: !routeActive ? 0.5 : 1 }}
+            style={{ opacity: (!routeActive || !hasActiveDevice) ? 0.5 : 1 }}
           >
             Stop Route
           </Button>

@@ -20,6 +20,7 @@ const initialStatus = {
 export default function Dashboard() {
   const [vehicleStatus, setVehicleStatus] = useState(initialStatus);
   const [currentMode, setCurrentMode] = useState(vehicleStatus.mode);
+  const [activeDeviceId, setActiveDeviceId] = useState(null);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -36,6 +37,34 @@ export default function Dashboard() {
   useEffect(() => {
     setCurrentMode(vehicleStatus.mode);
   }, [vehicleStatus.mode]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchActiveDevice = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/devices");
+        if (!response.ok) return;
+        const data = await response.json();
+        const connectedDevice = data.devices?.find((device) => device.connected);
+        if (isMounted) {
+          setActiveDeviceId(connectedDevice ? connectedDevice.device_id : null);
+        }
+      } catch (error) {
+        if (isMounted) {
+          setActiveDeviceId(null);
+        }
+      }
+    };
+
+    fetchActiveDevice();
+    const intervalId = setInterval(fetchActiveDevice, 3000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, []);
 
   const handleModeChange = (newMode) => {
     setCurrentMode(newMode);
@@ -164,6 +193,7 @@ export default function Dashboard() {
                 mode={currentMode}
                 vehicleStatus={vehicleStatus}
                 onStatusUpdate={handleStatusUpdate}
+                deviceId={activeDeviceId}
               />
             </div>
           </div>

@@ -778,7 +778,10 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                 # sleep remaining time
                 elapsed = time.time() - start
                 await asyncio.sleep(max(0, interval - elapsed))
-
+        except websockets.exceptions.ConnectionClosedOK as e:
+            print(f"WebSocket closed cleanly: code={e.code} reason={e.reason}")
+        except websockets.exceptions.ConnectionClosedError as e:
+            print(f"WebSocket closed by server: code={e.code} reason={e.reason}")
         except KeyboardInterrupt:
             print("\nShutting down pi simulator...")
         finally:
@@ -795,50 +798,68 @@ UDP_BROADCAST_PORT = 50010
 UDP_LISTEN_PORT = 50011
 UDP_BROADCAST_ADDR = '<broadcast>'
 
-def broadcast_presence(device_id, info=None):
+def broadcast_presence(device_id, info=None, listen_port=None):
     """Broadcast device presence via UDP."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     payload = json.dumps({
         "device_id": device_id,
         "info": info or "pi-sim",
-        "action": "announce"
+        "action": "announce",
+        "listen_port": listen_port or UDP_LISTEN_PORT,
     }).encode()
     sock.sendto(payload, (UDP_BROADCAST_ADDR, UDP_BROADCAST_PORT))
     sock.close()
 
-def wait_for_connect(device_id, timeout=60):
+def wait_for_connect(device_id, listen_sock, timeout=60):
     """Wait for a UDP 'connect' command from the server."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", UDP_LISTEN_PORT))
-    sock.settimeout(timeout)
-    print(f"[{device_id}] Waiting for connect command from server...")
+    listen_sock.settimeout(timeout)
+    print(f"[{device_id}] Waiting for connect command from server on UDP port {listen_sock.getsockname()[1]}...")
     try:
         while True:
-            data, addr = sock.recvfrom(4096)
+            data, addr = listen_sock.recvfrom(4096)
             try:
                 msg = json.loads(data.decode())
             except Exception:
                 continue
             if msg.get("action") == "connect" and msg.get("device_id") == device_id:
                 print(f"[{device_id}] Received connect command from {addr}")
-                sock.close()
                 return msg.get("ws_url", None)
     except socket.timeout:
         print(f"[{device_id}] Timeout waiting for connect command.")
-        sock.close()
         return None
+    finally:
+        listen_sock.close()
 
 if __name__ == "__main__":
     # Usage: python client.py [device_id] [fps]
     device_id = sys.argv[1] if len(sys.argv) > 1 else "pi-01"
     fps = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
-    # Step 1: Broadcast presence
-    broadcast_presence(device_id)
-    # Step 2: Wait for connect command
-    ws_url = wait_for_connect(device_id)
-    if not ws_url:
-        print(f"[{device_id}] No connect command received. Exiting.")
-        sys.exit(1)
-    # Step 3: Connect to server WebSocket
-    asyncio.run(pi_client(ws_url, device_id=device_id, fps=fps))
+
+    try:
+        while True:
+            # Prepare a dedicated UDP socket for this standby cycle
+            listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except (AttributeError, OSError):
+                pass
+            listen_sock.bind(("", 0))  # pick an ephemeral port
+            listen_port = listen_sock.getsockname()[1]
+
+            # Step 1: Broadcast presence with the chosen port
+            broadcast_presence(device_id, listen_port=listen_port)
+
+            # Step 2: Wait for connect command
+            ws_url = wait_for_connect(device_id, listen_sock)
+            if not ws_url:
+                print(f"[{device_id}] No connect command received. Retrying in 5 seconds...")
+                time.sleep(5)
+                continue
+
+            # Step 3: Connect to server WebSocket
+            asyncio.run(pi_client(ws_url, device_id=device_id, fps=fps))
+            print(f"[{device_id}] WebSocket session ended. Returning to standby.")
+    except KeyboardInterrupt:
+        print("\nShutting down pi simulator...")
