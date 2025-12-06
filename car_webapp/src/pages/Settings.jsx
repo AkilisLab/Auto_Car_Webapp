@@ -1,29 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/button';
 import { Card, CardContent } from '../components/ui/card';
 import { CheckCircle, Loader2, Wifi, KeyRound, ShieldCheck, Zap, WifiOff } from 'lucide-react';
 
-// Mock vehicle data for local use
-const mockCars = [
-	{
-		id: 1,
-		name: 'AutoDrive One',
-		model: 'Sedan X',
-		image_url:
-			'https://plus.unsplash.com/premium_photo-1683134240084-ba074973f75e?ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&q=80&w=1895',
-		status: 'offline',
-	},
-	{
-		id: 2,
-		name: 'AutoDrive Two',
-		model: 'SUV Pro',
-		image_url:
-			'https://images.unsplash.com/photo-1503736334956-4c8f8e92946d?auto=format&fit=crop&w=800&q=80',
-		status: 'offline',
-	},
-];
+// Default car image for devices
+const defaultCarImage = 'https://images.unsplash.com/photo-1503736334956-4c8f8e92946d?auto=format&fit=crop&w=800&q=80';
 
 const connectionSteps = [
 	{ text: 'Establishing secure link...', icon: Wifi },
@@ -88,19 +71,77 @@ function ConnectionAnimator({ car, onComplete }) {
 export default function SettingsPage() {
 	const navigate = useNavigate();
 	const [selectedCar, setSelectedCar] = useState(null);
-	const [cars, setCars] = useState(mockCars);
-	const [isLoading, setIsLoading] = useState(false);
+	const [cars, setCars] = useState([]);
+	const [isLoading, setIsLoading] = useState(true);
 
-	const handleConnect = (carToConnect) => {
-		// Disconnect any other connected cars
-		setCars((prev) =>
-			prev.map((car) =>
-				car.id === carToConnect.id
-					? { ...car, status: 'connected' }
-					: { ...car, status: 'offline' }
-			)
-		);
-		setSelectedCar(carToConnect);
+	useEffect(() => {
+		fetchDevices();
+	}, []);
+
+	const fetchDevices = async () => {
+		try {
+			const response = await fetch('http://localhost:8000/devices');
+			const data = await response.json();
+			console.log('Fetched devices data:', data);
+			const mappedCars = data.devices.map(device => ({
+				id: device.device_id,
+				name: device.device_id || 'Unknown Device',
+				model: device.info || 'Pi Simulator',
+				image_url: defaultCarImage,
+				status: device.connected ? 'connected' : 'offline',
+				connected: device.connected,
+			}));
+			console.log('Mapped cars:', mappedCars);
+			setCars(mappedCars);
+		} catch (error) {
+			console.error('Error fetching devices:', error);
+		} finally {
+			setIsLoading(false);
+		}
+	};
+
+	const handleConnect = async (carToConnect) => {
+		console.log('Connecting to car:', carToConnect);
+		try {
+			const response = await fetch('http://localhost:8000/connect_device', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					device_id: carToConnect.id,
+					ws_url: 'ws://localhost:8000/ws'
+				})
+			});
+			console.log('Connect response:', response.status, response.ok);
+			if (response.ok) {
+				// Update status to connecting
+				setCars(prev => prev.map(car =>
+					car.id === carToConnect.id ? { ...car, status: 'connecting' } : car
+				));
+				// Poll for connection status
+				const pollInterval = setInterval(async () => {
+					try {
+						const res = await fetch('http://localhost:8000/devices');
+						const data = await res.json();
+						const device = data.devices.find(d => d.device_id === carToConnect.id);
+						console.log('Polling device status:', device);
+						if (device && device.connected) {
+							console.log('Device connected, navigating to Dashboard');
+							clearInterval(pollInterval);
+							setCars(prev => prev.map(car =>
+								car.id === carToConnect.id ? { ...car, status: 'connected' } : car
+							));
+							setSelectedCar(carToConnect);
+						}
+					} catch (error) {
+						console.error('Error polling devices:', error);
+					}
+				}, 1000); // Poll every 1 second
+			} else {
+				console.error('Failed to connect device');
+			}
+		} catch (error) {
+			console.error('Error connecting device:', error);
+		}
 	};
 
 	const onConnectionComplete = () => {
@@ -143,9 +184,9 @@ export default function SettingsPage() {
 						initial="hidden"
 						animate="show"
 					>
-						{cars.map((car) => (
+						{cars.map((car, index) => (
 							<motion.div
-								key={car.id}
+								key={car.id || `device-${index}`}
 								variants={{
 									hidden: { opacity: 0, y: 20 },
 									show: { opacity: 1, y: 0 },
@@ -167,17 +208,23 @@ export default function SettingsPage() {
 												className={`flex items-center gap-2 text-sm px-3 py-1 rounded-full ${
 													car.status === 'connected'
 														? 'bg-green-500/20 text-green-400'
+														: car.status === 'connecting'
+														? 'bg-yellow-500/20 text-yellow-400'
 														: 'bg-slate-600/50 text-slate-300'
 												}`}
 											>
 												{car.status === 'connected' ? (
 													<Wifi className="w-4 h-4" />
+												) : car.status === 'connecting' ? (
+													<Loader2 className="w-4 h-4 animate-spin" />
 												) : (
 													<WifiOff className="w-4 h-4" />
 												)}
 												<span>
 													{car.status === 'connected'
 														? 'Connected'
+														: car.status === 'connecting'
+														? 'Connecting...'
 														: 'Offline'}
 												</span>
 											</div>
@@ -187,11 +234,17 @@ export default function SettingsPage() {
 										<Button
 											className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold"
 											onClick={() => handleConnect(car)}
-											disabled={car.status === 'connected'}
+											disabled={car.status === 'connected' || car.status === 'connecting'}
 										>
-											<Zap className="w-4 h-4 mr-2" />
+											{car.status === 'connecting' ? (
+												<Loader2 className="w-4 h-4 mr-2 animate-spin" />
+											) : (
+												<Zap className="w-4 h-4 mr-2" />
+											)}
 											{car.status === 'connected'
 												? 'Already Connected'
+												: car.status === 'connecting'
+												? 'Connecting...'
 												: 'Connect'}
 										</Button>
 									</div>

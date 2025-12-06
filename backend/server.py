@@ -9,6 +9,10 @@ from typing import Dict, Any
 # Import your planner
 import Astar_planner
 
+
+import threading
+import socket
+
 app = FastAPI(title="WebSocket Demo Server")
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +21,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Device Discovery ---
+UDP_BROADCAST_PORT = 50010
+UDP_LISTEN_PORT = 50011
+discovered_devices = {}  # device_id -> {info, last_seen, ip}
+
+def udp_listener():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.bind(("", UDP_BROADCAST_PORT))
+    print(f"[SERVER] UDP listener started on port {UDP_BROADCAST_PORT}")
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+            msg = json.loads(data.decode())
+            if msg.get("action") == "announce":
+                device_id = msg.get("device_id")
+                info = msg.get("info", "")
+                discovered_devices[device_id] = {
+                    "info": info,
+                    "last_seen": time.time(),
+                    "ip": addr[0],
+                    "status": "discovered"
+                }
+                print(f"[SERVER] Discovered device: {device_id} from {addr[0]}")
+        except Exception as e:
+            print(f"[SERVER] UDP listener error: {e}")
+
+# Start UDP listener in background thread
+udp_thread = threading.Thread(target=udp_listener, daemon=True)
+udp_thread.start()
 
 
 # --- NAVIGATION SETUP ---
@@ -55,6 +90,7 @@ class ConnectionManager:
             self.unregistered.add(websocket)
 
     async def register(self, websocket: WebSocket, device_id: str, role: str, meta: dict | None = None):
+        notify_frontends = False
         async with self.lock:
             self.unregistered.discard(websocket)
             # remove any existing mapping for this websocket
@@ -68,6 +104,18 @@ class ConnectionManager:
                 "last_seen": time.time(),
                 "emergency": False,
             }
+            if role == "pi":
+                notify_frontends = True
+                if device_id in discovered_devices:
+                    discovered_devices[device_id]["connected_at"] = time.time()
+                    discovered_devices[device_id]["status"] = "connected"
+        if notify_frontends:
+            await self.broadcast_to_frontends({
+                "action": "device_connected",
+                "device_id": device_id,
+                "role": role,
+                "ts": time.time()
+            })
 
     async def disconnect(self, websocket: WebSocket):
         async with self.lock:
@@ -172,9 +220,66 @@ async def root():
     return {"message": "WebSocket server running"}
 
 
+
+# List both discovered and connected devices
 @app.get("/devices")
 async def devices():
-    return {"devices": await manager.list_devices()}
+    connected = await manager.list_devices()
+    # Merge discovered and connected
+    all_devices = {}
+    for d in discovered_devices:
+        all_devices[d] = discovered_devices[d].copy()
+        all_devices[d]["device_id"] = d
+        all_devices[d]["connected"] = False
+    for d in connected:
+        did = d["device_id"]
+        if did in all_devices:
+            all_devices[did]["connected"] = True
+            all_devices[did]["role"] = d["role"]
+            all_devices[did]["meta"] = d["meta"]
+            all_devices[did]["last_seen"] = d["last_seen"]
+            all_devices[did]["emergency"] = d["emergency"]
+        else:
+            all_devices[did] = {
+                "info": d.get("meta", {}),
+                "last_seen": d["last_seen"],
+                "ip": None,
+                "status": d["role"],
+                "connected": True,
+                "role": d["role"],
+                "meta": d["meta"],
+                "emergency": d["emergency"]
+            }
+    return {"devices": list(all_devices.values())}
+
+
+# Connect API: trigger client to connect via UDP
+@app.post("/connect_device")
+async def connect_device(request: Request):
+    body = await request.json()
+    device_id = body.get("device_id")
+    ws_url = body.get("ws_url", "ws://0.0.0.0:8000/ws")  # Default to local server
+    print(f"[SERVER] /connect_device called for device_id={device_id}, ws_url={ws_url}")
+    if not device_id or device_id not in discovered_devices:
+        print(f"[SERVER] /connect_device error: device_id {device_id} not in discovered_devices {list(discovered_devices.keys())}")
+        return {"status": "error", "message": "Device not found"}
+    # Send UDP connect command to device
+    ip = discovered_devices[device_id]["ip"]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    payload = json.dumps({
+        "action": "connect",
+        "device_id": device_id,
+        "ws_url": ws_url
+    }).encode()
+    try:
+        sock.sendto(payload, (ip, UDP_LISTEN_PORT))
+        discovered_devices[device_id]["status"] = "connect_sent"
+        discovered_devices[device_id]["last_connect"] = time.time()
+        print(f"[SERVER] Sent connect command to {device_id} at {ip}")
+        return {"status": "ok", "message": f"Connect command sent to {device_id}"}
+    except Exception as e:
+        print(f"[SERVER] Error sending connect command: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/control")

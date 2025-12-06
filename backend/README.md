@@ -35,15 +35,23 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 hostname -I
 ```
 
-Pi simulator client
+
+Pi simulator client (new workflow)
 
 1. Ensure Python and the same dependencies are installed (or reuse a venv).
 
-2. Run the client and point it to the server's IP (replace X.X.X.X):
+2. Start the client (device) and let it broadcast its presence:
 
 ```bash
-python client.py ws://X.X.X.X:8000/ws pi-01 5
+python client.py [device_id] [fps]
+# Example:
+python client.py pi-01 5
 ```
+
+3. The client will broadcast its existence via UDP and wait for a connect command from the server.
+	The server (once updated) will send a connect command to the client, which will then connect to the WebSocket endpoint automatically.
+
+4. You no longer need to specify the WebSocket URL directly; the server controls connection initiation.
 
 Environment for AI server (optional):
 ```bash

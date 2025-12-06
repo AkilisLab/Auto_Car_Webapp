@@ -787,11 +787,58 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
             recv_task.cancel()
 
 
+
+# --- Device Discovery and Wait-for-Connect ---
+import socket
+
+UDP_BROADCAST_PORT = 50010
+UDP_LISTEN_PORT = 50011
+UDP_BROADCAST_ADDR = '<broadcast>'
+
+def broadcast_presence(device_id, info=None):
+    """Broadcast device presence via UDP."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    payload = json.dumps({
+        "device_id": device_id,
+        "info": info or "pi-sim",
+        "action": "announce"
+    }).encode()
+    sock.sendto(payload, (UDP_BROADCAST_ADDR, UDP_BROADCAST_PORT))
+    sock.close()
+
+def wait_for_connect(device_id, timeout=60):
+    """Wait for a UDP 'connect' command from the server."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", UDP_LISTEN_PORT))
+    sock.settimeout(timeout)
+    print(f"[{device_id}] Waiting for connect command from server...")
+    try:
+        while True:
+            data, addr = sock.recvfrom(4096)
+            try:
+                msg = json.loads(data.decode())
+            except Exception:
+                continue
+            if msg.get("action") == "connect" and msg.get("device_id") == device_id:
+                print(f"[{device_id}] Received connect command from {addr}")
+                sock.close()
+                return msg.get("ws_url", None)
+    except socket.timeout:
+        print(f"[{device_id}] Timeout waiting for connect command.")
+        sock.close()
+        return None
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python client.py ws://<server_ip>:8000/ws [device_id] [fps]")
+    # Usage: python client.py [device_id] [fps]
+    device_id = sys.argv[1] if len(sys.argv) > 1 else "pi-01"
+    fps = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
+    # Step 1: Broadcast presence
+    broadcast_presence(device_id)
+    # Step 2: Wait for connect command
+    ws_url = wait_for_connect(device_id)
+    if not ws_url:
+        print(f"[{device_id}] No connect command received. Exiting.")
         sys.exit(1)
-    uri = sys.argv[1]
-    device_id = sys.argv[2] if len(sys.argv) > 2 else "pi-01"
-    fps = float(sys.argv[3]) if len(sys.argv) > 3 else 5.0
-    asyncio.run(pi_client(uri, device_id=device_id, fps=fps))
+    # Step 3: Connect to server WebSocket
+    asyncio.run(pi_client(ws_url, device_id=device_id, fps=fps))
