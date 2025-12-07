@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/button';
@@ -75,6 +75,42 @@ export default function SettingsPage() {
 	const [isLoading, setIsLoading] = useState(true);
 	const pollingRef = useRef(null);
 
+	const fetchDevices = useCallback(async (withSpinner = false) => {
+		if (withSpinner) {
+			setIsLoading(true);
+		}
+		try {
+			const response = await fetch('http://localhost:8000/devices');
+			const data = await response.json();
+			console.log('Fetched devices data:', data);
+			const mappedCars = (data.devices || []).map(device => {
+				const isAvailable = device.available !== false;
+				const deviceState = device.connected
+					? 'connected'
+					: isAvailable
+						? 'available'
+						: 'offline';
+				return {
+					id: device.device_id,
+					name: device.device_id || 'Unknown Device',
+					model: device.info || 'Pi Simulator',
+					image_url: defaultCarImage,
+					status: deviceState,
+					connected: device.connected,
+					available: isAvailable,
+				};
+			});
+			console.log('Mapped cars:', mappedCars);
+			setCars(mappedCars);
+		} catch (error) {
+			console.error('Error fetching devices:', error);
+		} finally {
+			if (withSpinner) {
+				setIsLoading(false);
+			}
+		}
+	}, []);
+
 	const clearPolling = () => {
 		if (pollingRef.current) {
 			clearInterval(pollingRef.current);
@@ -85,35 +121,14 @@ export default function SettingsPage() {
 	useEffect(() => {
 		fetchDevices(true);
 		return () => clearPolling();
-	}, []);
+	}, [fetchDevices]);
 
-	const fetchDevices = async (withSpinner = false) => {
-		if (withSpinner) {
-			setIsLoading(true);
-		}
-		try {
-			const response = await fetch('http://localhost:8000/devices');
-			const data = await response.json();
-			console.log('Fetched devices data:', data);
-			const mappedCars = data.devices.map(device => ({
-				id: device.device_id,
-				name: device.device_id || 'Unknown Device',
-				model: device.info || 'Pi Simulator',
-				image_url: defaultCarImage,
-				status: device.connected ? 'connected' : 'offline',
-				connected: device.connected,
-				available: device.available !== false,
-			}));
-			console.log('Mapped cars:', mappedCars);
-			setCars(mappedCars);
-		} catch (error) {
-			console.error('Error fetching devices:', error);
-		} finally {
-			if (withSpinner) {
-				setIsLoading(false);
-			}
-		}
-	};
+	useEffect(() => {
+		const intervalId = setInterval(() => {
+			fetchDevices(false);
+		}, 3000);
+		return () => clearInterval(intervalId);
+	}, [fetchDevices]);
 
 	const handleDisconnect = async (carToDisconnect) => {
 		console.log('Disconnecting car:', carToDisconnect);
@@ -128,7 +143,7 @@ export default function SettingsPage() {
 			console.log('Disconnect response:', response.status, response.ok);
 			setCars(prev => prev.map(car =>
 				car.id === carToDisconnect.id
-					? { ...car, status: 'offline', connected: false }
+					? { ...car, status: car.available ? 'available' : 'offline', connected: false }
 					: car
 			));
 			await fetchDevices();
@@ -156,7 +171,7 @@ export default function SettingsPage() {
 		setCars(prev => prev.map(car =>
 			car.id === carToConnect.id
 				? { ...car, status: 'connecting' }
-				: { ...car, status: 'offline', connected: false }
+				: { ...car, status: car.available ? 'available' : 'offline', connected: false }
 		));
 		try {
 			const response = await fetch('http://localhost:8000/connect_device', {
@@ -237,75 +252,99 @@ export default function SettingsPage() {
 						initial="hidden"
 						animate="show"
 					>
-						{cars.map((car, index) => (
-							<motion.div
-								key={car.id || `device-${index}`}
-								variants={{
-									hidden: { opacity: 0, y: 20 },
-									show: { opacity: 1, y: 0 },
-								}}
-							>
-								<Card className="glass-effect border-slate-700 h-full flex flex-col justify-between">
-									<CardContent className="pt-6">
-										<img
-											src={car.image_url}
-											alt={car.name}
-											className="rounded-lg mb-4 aspect-video object-cover"
-										/>
-										<div className="flex justify-between items-start">
-											<div>
-												<h2 className="text-xl font-bold">{car.name}</h2>
-												<p className="text-slate-400">{car.model}</p>
+						{cars.map((car, index) => {
+							const isConnected = car.status === 'connected';
+							const isConnecting = car.status === 'connecting';
+							const isAvailable = car.status === 'available';
+							const badgeClass = isConnected
+								? 'bg-green-500/20 text-green-400'
+								: isConnecting
+								? 'bg-yellow-500/20 text-yellow-400'
+								: isAvailable
+								? 'bg-blue-500/20 text-blue-300'
+								: 'bg-slate-600/50 text-slate-300';
+							const badgeIcon = isConnected ? (
+								<Wifi className="w-4 h-4" />
+							) : isConnecting ? (
+								<Loader2 className="w-4 h-4 animate-spin" />
+							) : isAvailable ? (
+								<Zap className="w-4 h-4" />
+							) : (
+								<WifiOff className="w-4 h-4" />
+							);
+							const badgeLabel = isConnected
+								? 'Connected'
+								: isConnecting
+								? 'Connecting...'
+								: isAvailable
+								? 'Ready'
+								: 'Offline';
+							const buttonDisabled = isConnecting || (!car.available && !car.connected);
+							const buttonIcon = isConnected ? (
+								<WifiOff className="w-4 h-4 mr-2" />
+							) : isConnecting ? (
+								<Loader2 className="w-4 h-4 mr-2 animate-spin" />
+							) : isAvailable ? (
+								<Zap className="w-4 h-4 mr-2" />
+							) : (
+								<WifiOff className="w-4 h-4 mr-2" />
+							);
+							const buttonLabel = isConnected
+								? 'Disconnect'
+								: isConnecting
+								? 'Connecting...'
+								: isAvailable
+								? 'Connect'
+								: 'Unavailable';
+							const buttonCursor = isConnecting ? 'wait' : buttonDisabled ? 'not-allowed' : 'pointer';
+
+							return (
+								<motion.div
+									key={car.id || `device-${index}`}
+									variants={{
+										hidden: { opacity: 0, y: 20 },
+										show: { opacity: 1, y: 0 },
+									}}
+								>
+									<Card className="glass-effect border-slate-700 h-full flex flex-col justify-between">
+										<CardContent className="pt-6">
+											<img
+												src={car.image_url}
+												alt={car.name}
+												className="rounded-lg mb-4 aspect-video object-cover"
+											/>
+											<div className="flex justify-between items-start">
+												<div>
+													<h2 className="text-xl font-bold">{car.name}</h2>
+													<p className="text-slate-400">{car.model}</p>
+												</div>
+												<div
+													className={`flex items-center gap-2 text-sm px-3 py-1 rounded-full ${badgeClass}`}
+												>
+													{badgeIcon}
+													<span>{badgeLabel}</span>
+												</div>
 											</div>
-											<div
-												className={`flex items-center gap-2 text-sm px-3 py-1 rounded-full ${
-													car.status === 'connected'
-														? 'bg-green-500/20 text-green-400'
-														: car.status === 'connecting'
-														? 'bg-yellow-500/20 text-yellow-400'
-														: 'bg-slate-600/50 text-slate-300'
-												}`}
+										</CardContent>
+										<div className="p-6 pt-0">
+											<Button
+												className="w-full text-white font-bold"
+												style={{
+													opacity: buttonDisabled ? 0.5 : 1,
+													cursor: buttonCursor,
+												}}
+												onClick={() => handleConnect(car)}
+												disabled={buttonDisabled}
+												title={!isAvailable && !isConnected ? 'Device is offline' : undefined}
 											>
-												{car.status === 'connected' ? (
-													<Wifi className="w-4 h-4" />
-												) : car.status === 'connecting' ? (
-													<Loader2 className="w-4 h-4 animate-spin" />
-												) : (
-													<WifiOff className="w-4 h-4" />
-												)}
-												<span>
-													{car.status === 'connected'
-														? 'Connected'
-														: car.status === 'connecting'
-														? 'Connecting...'
-														: 'Offline'}
-												</span>
-											</div>
+												{buttonIcon}
+												{buttonLabel}
+											</Button>
 										</div>
-									</CardContent>
-									<div className="p-6 pt-0">
-										<Button
-											className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold"
-											onClick={() => handleConnect(car)}
-											disabled={car.status === 'connecting' || (!car.available && !car.connected)}
-										>
-											{car.status === 'connecting' ? (
-												<Loader2 className="w-4 h-4 mr-2 animate-spin" />
-											) : car.status === 'connected' ? (
-												<WifiOff className="w-4 h-4 mr-2" />
-											) : (
-												<Zap className="w-4 h-4 mr-2" />
-											)}
-											{car.status === 'connected'
-												? 'Disconnect'
-												: car.status === 'connecting'
-												? 'Connecting...'
-												: 'Connect'}
-										</Button>
-									</div>
-								</Card>
-							</motion.div>
-						))}
+									</Card>
+								</motion.div>
+							);
+						})}
 					</motion.div>
 				)}
 			</div>

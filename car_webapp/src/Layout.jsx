@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Car, Zap, Shield, Home, Settings, Tv } from "lucide-react";
 
@@ -9,6 +9,63 @@ export default function Layout({ children }) {
     { name: "Dashboard", path: "/Dashboard", icon: Tv },
     { name: "Connect", path: "/Settings", icon: Settings },
   ];
+
+  const [deviceSummary, setDeviceSummary] = useState({
+    connected: 0,
+    available: 0,
+    total: 0,
+    error: false,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchStatus = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/devices");
+        if (!response.ok) throw new Error("Failed to fetch devices");
+        const data = await response.json();
+        if (cancelled) return;
+        const devices = Array.isArray(data.devices) ? data.devices : [];
+        const connected = devices.filter((device) => device.connected).length;
+        const available = devices.filter((device) => device.available !== false).length;
+        setDeviceSummary({ connected, available, total: devices.length, error: false });
+      } catch (error) {
+        if (!cancelled) {
+          setDeviceSummary((prev) => ({
+            connected: prev.connected,
+            available: prev.available,
+            total: prev.total,
+            error: true,
+          }));
+        }
+      }
+    };
+
+    fetchStatus();
+    const intervalId = setInterval(fetchStatus, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  let statusClass = "standby";
+  let statusText = "Checking...";
+  if (deviceSummary.error) {
+    statusClass = "offline";
+    statusText = "Status Unavailable";
+  } else if (deviceSummary.connected > 0) {
+    statusClass = "ok";
+    statusText = deviceSummary.connected > 1 ? `Connected (${deviceSummary.connected})` : "Connected";
+  } else if (deviceSummary.available > 0) {
+    statusClass = "standby";
+    statusText = deviceSummary.available > 1 ? `Ready (${deviceSummary.available})` : "Ready";
+  } else {
+    statusClass = "offline";
+    statusText = "No Devices";
+  }
 
   return (
     <div className="app-root">
@@ -57,6 +114,8 @@ export default function Layout({ children }) {
           /* status */
           .status { display:flex; gap:14px; align-items:center; color:var(--muted); }
           .status .ok { color: #2bd76a; display:flex; gap:8px; align-items:center; }
+          .status .standby { color: #fbbf24; display:flex; gap:8px; align-items:center; }
+          .status .offline { color: #f87171; display:flex; gap:8px; align-items:center; }
 
           /* main container - centers pages (hero) */
           .main { flex:1 1 auto; padding:48px 20px; }
@@ -108,8 +167,8 @@ export default function Layout({ children }) {
             })}
           </nav>
 
-          <div className="status" aria-hidden>
-            <div className="ok"><Zap className="icon" /> <span className="status-text">Connected</span></div>
+          <div className="status" aria-live="polite">
+            <div className={statusClass}><Zap className="icon" /> <span className="status-text">{statusText}</span></div>
             <div><Shield className="icon" /> <span className="status-text">Secure</span></div>
           </div>
         </div>

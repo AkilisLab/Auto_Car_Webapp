@@ -26,6 +26,7 @@ app.add_middleware(
 UDP_BROADCAST_PORT = 50010
 UDP_LISTEN_PORT = 50011
 discovered_devices = {}  # device_id -> {info, last_seen, ip}
+DEVICE_TIMEOUT_SECONDS = 8
 
 def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -251,13 +252,18 @@ async def root():
 @app.get("/devices")
 async def devices():
     connected = await manager.list_devices()
+    now = time.time()
     # Merge discovered and connected
     all_devices = {}
     for d in discovered_devices:
-        all_devices[d] = discovered_devices[d].copy()
-        all_devices[d]["device_id"] = d
-        all_devices[d]["connected"] = False
-        all_devices[d]["available"] = bool(discovered_devices[d].get("ip"))
+        entry = discovered_devices[d].copy()
+        last_seen = entry.get("last_seen", 0)
+        is_available = bool(entry.get("ip")) and (now - last_seen) <= DEVICE_TIMEOUT_SECONDS
+        entry["device_id"] = d
+        entry["connected"] = False
+        entry["available"] = is_available
+        entry["status"] = "discovered" if is_available else "offline"
+        all_devices[d] = entry
     for d in connected:
         did = d["device_id"]
         if did in all_devices:
@@ -267,12 +273,13 @@ async def devices():
             all_devices[did]["last_seen"] = d["last_seen"]
             all_devices[did]["emergency"] = d["emergency"]
             all_devices[did]["available"] = True
+            all_devices[did]["status"] = "connected"
         else:
             all_devices[did] = {
                 "info": d.get("meta", {}),
                 "last_seen": d["last_seen"],
                 "ip": None,
-                "status": d["role"],
+                "status": "connected",
                 "connected": True,
                 "role": d["role"],
                 "meta": d["meta"],
