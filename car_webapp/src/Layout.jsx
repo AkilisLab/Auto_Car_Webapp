@@ -27,9 +27,12 @@ export default function Layout({ children }) {
         const data = await response.json();
         if (cancelled) return;
         const devices = Array.isArray(data.devices) ? data.devices : [];
-        const connected = devices.filter((device) => device.connected).length;
-        const available = devices.filter((device) => device.available !== false).length;
-        setDeviceSummary({ connected, available, total: devices.length, error: false });
+        const vehicleDevices = devices.filter(
+          (device) => (device.role || "pi").toLowerCase() !== "frontend"
+        );
+        const connected = vehicleDevices.filter((device) => device.connected).length;
+        const available = vehicleDevices.filter((device) => device.available !== false).length;
+        setDeviceSummary({ connected, available, total: vehicleDevices.length, error: false });
       } catch (error) {
         if (!cancelled) {
           setDeviceSummary((prev) => ({

@@ -46,7 +46,9 @@ export default function Dashboard() {
         const response = await fetch("http://localhost:8000/devices");
         if (!response.ok) return;
         const data = await response.json();
-        const connectedDevice = data.devices?.find((device) => device.connected);
+        const connectedDevice = data.devices?.find(
+          (device) => device.connected && (device.role || "pi").toLowerCase() === "pi"
+        );
         if (isMounted) {
           setActiveDeviceId(connectedDevice ? connectedDevice.device_id : null);
         }

@@ -402,6 +402,7 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
             global _grid_route_active, _grid_waypoints, _grid_current_index, _grid_start_time
             global _current_speed, _current_angle, _emergency_active, _last_emergency_time
             global _route_active, _simulated_speed
+            global AI_SERVER_URL
 
             try:
                 async for message in ws:
@@ -414,6 +415,11 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     act = pkt.get("action")
                     ptype = pkt.get("type")
                     payload = pkt.get("payload", {})
+
+                    if isinstance(payload, dict):
+                        ai_override = payload.get("ai_server_url")
+                        if ai_override:
+                            AI_SERVER_URL = ai_override
                     src = pkt.get("from") or pkt.get("device_id")
                     # Microphone open/close control
                     if act == "control" and ptype == "microphone_open":

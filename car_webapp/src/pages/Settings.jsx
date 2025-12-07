@@ -83,7 +83,11 @@ export default function SettingsPage() {
 			const response = await fetch('http://localhost:8000/devices');
 			const data = await response.json();
 			console.log('Fetched devices data:', data);
-			const mappedCars = (data.devices || []).map(device => {
+			const rawDevices = Array.isArray(data.devices) ? data.devices : [];
+			const vehicleDevices = rawDevices.filter(
+				(device) => (device.role || 'pi').toLowerCase() !== 'frontend'
+			);
+			const mappedCars = vehicleDevices.map(device => {
 				const isAvailable = device.available !== false;
 				const deviceState = device.connected
 					? 'connected'
@@ -93,7 +97,7 @@ export default function SettingsPage() {
 				return {
 					id: device.device_id,
 					name: device.device_id || 'Unknown Device',
-					model: device.info || 'Pi Simulator',
+					model: (device.meta && device.meta.model) || device.info || 'Pi Simulator',
 					image_url: defaultCarImage,
 					status: deviceState,
 					connected: device.connected,

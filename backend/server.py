@@ -5,6 +5,7 @@ import json
 import time
 import os
 from typing import Dict, Any
+from urllib.parse import urlparse, urlunparse
 
 # Import your planner
 import Astar_planner
@@ -27,6 +28,57 @@ UDP_BROADCAST_PORT = 50010
 UDP_LISTEN_PORT = 50011
 discovered_devices = {}  # device_id -> {info, last_seen, ip}
 DEVICE_TIMEOUT_SECONDS = 8
+AI_SERVER_URL_DEFAULT = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8010")
+
+def resolve_local_ip_for(target_ip: str) -> str | None:
+    """Determine the local interface IP that can reach target_ip."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect((target_ip, 1))
+        return probe.getsockname()[0]
+    except Exception:
+        return None
+    finally:
+        probe.close()
+
+
+def normalize_ws_url(ws_url: str | None, device_ip: str, default_port: int = 8000) -> str:
+    """Ensure the websocket URL is reachable from the device."""
+    if not ws_url:
+        ws_url = f"ws://0.0.0.0:{default_port}/ws"
+
+    parsed = urlparse(ws_url)
+    host = parsed.hostname or "0.0.0.0"
+    port = parsed.port or default_port
+
+    if host in {"0.0.0.0", "127.0.0.1", "localhost"}:
+        replacement = resolve_local_ip_for(device_ip)
+        if replacement:
+            host = replacement
+
+    netloc = f"{host}:{port}"
+    normalized = parsed._replace(netloc=netloc)
+    if not normalized.path or normalized.path == "/":
+        normalized = normalized._replace(path="/ws")
+    return urlunparse(normalized)
+
+
+def normalize_service_url(service_url: str | None, device_ip: str | None) -> str:
+    if not service_url:
+        return ""
+
+    parsed = urlparse(service_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port
+
+    if device_ip and host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        replacement = resolve_local_ip_for(device_ip)
+        if replacement:
+            host = replacement
+
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
 
 def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -294,8 +346,8 @@ async def devices():
 async def connect_device(request: Request):
     body = await request.json()
     device_id = body.get("device_id")
-    ws_url = body.get("ws_url", "ws://0.0.0.0:8000/ws")  # Default to local server
-    print(f"[SERVER] /connect_device called for device_id={device_id}, ws_url={ws_url}")
+    requested_ws_url = body.get("ws_url")
+    print(f"[SERVER] /connect_device called for device_id={device_id}, requested_ws_url={requested_ws_url}")
     if not device_id or device_id not in discovered_devices:
         print(f"[SERVER] /connect_device error: device_id {device_id} not in discovered_devices {list(discovered_devices.keys())}")
         return {"status": "error", "message": "Device not found"}
@@ -309,6 +361,8 @@ async def connect_device(request: Request):
 
     # Send UDP connect command to device
     ip = discovered_devices[device_id]["ip"]
+    ws_url = normalize_ws_url(requested_ws_url, ip)
+    print(f"[SERVER] Using websocket URL {ws_url} for device {device_id}")
     port = discovered_devices[device_id].get("listen_port", UDP_LISTEN_PORT)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     payload = json.dumps({
@@ -486,11 +540,18 @@ async def websocket_endpoint(websocket: WebSocket):
             if act in ["microphone_open", "microphone_close"] and role == "frontend":
                 # Forward microphone control to target device (default: pi-01)
                 target = packet.get("target") or payload.get("device_id") or "pi-01"
+                envelope_payload = dict(payload or {})
+                if target != "all" and target in discovered_devices:
+                    device_ip = discovered_devices[target].get("ip")
+                    envelope_payload.setdefault(
+                        "ai_server_url",
+                        normalize_service_url(AI_SERVER_URL_DEFAULT, device_ip),
+                    )
                 envelope = {
                     "from": src,
                     "action": "control",
                     "type": act,
-                    "payload": payload,
+                    "payload": envelope_payload,
                     "ts": ts or time.time(),
                 }
                 ok = await manager.send_to_device(target, envelope)
@@ -607,6 +668,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not qc_text:
                         await manager.send_json({"error": "missing quick_command text"}, websocket)
                         continue
+
+                    envelope_payload = dict(payload or {})
+                    if target and target != "all" and target in discovered_devices:
+                        device_ip = discovered_devices[target].get("ip")
+                        envelope_payload.setdefault(
+                            "ai_server_url",
+                            normalize_service_url(AI_SERVER_URL_DEFAULT, device_ip),
+                        )
+                    envelope["payload"] = envelope_payload
 
                     if target == "all" or payload.get("broadcast", False):
                         await manager.broadcast_to_pis(envelope)
