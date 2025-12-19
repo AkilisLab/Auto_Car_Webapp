@@ -111,7 +111,7 @@ udp_thread.start()
 
 # --- NAVIGATION SETUP ---
 # Load the grid map once on startup
-MAP_FILE = "test_grid.txt" # Change to "data/grid.txt" when ready
+MAP_FILE = "map_grid.txt" # Change to "data/grid.txt" when ready
 NAV_GRID = None
 POI_MAP = {
     "kitchen": (1, 1),

@@ -13,6 +13,7 @@ import math
 import random
 import os
 import requests
+import re
 try:
     import spotify  # local module moved next to client
 except Exception:
@@ -47,6 +48,378 @@ _grid_speed_cells_per_sec = 0.5  # simulation speed across cells
 
 # AI server configuration
 AI_SERVER_URL = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8010")
+
+
+def _extract_intent_line(response_text: str | None) -> str | None:
+    """Extract the final [[INTENT: ...]] line if present."""
+    if not isinstance(response_text, str) or not response_text.strip():
+        return None
+    m = re.search(r"^\s*\[\[INTENT:\s*(.*?)\]\]\s*$", response_text, flags=re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return None
+    # Prefer the last match (should be the final line)
+    matches = list(re.finditer(r"^\s*\[\[INTENT:\s*(.*?)\]\]\s*$", response_text, flags=re.IGNORECASE | re.MULTILINE))
+    if matches:
+        return matches[-1].group(1).strip() or None
+    return m.group(1).strip() or None
+
+
+def _parse_intent_kv(intent_body: str) -> tuple[str, dict]:
+    """Parse 'name; k=v; k2="v2"' into (name, args)."""
+    body = (intent_body or "").strip()
+    if not body:
+        return "", {}
+    parts = [p.strip() for p in body.split(";") if p.strip()]
+    name = parts[0].lower() if parts else ""
+    args: dict = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k = k.strip().lower()
+        v = v.strip()
+        if (len(v) >= 2) and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+            v = v[1:-1]
+        args[k] = v
+    return name, args
+
+
+def _intent_to_timed_drive(direction: str, duration_s: float) -> dict | None:
+    d = (direction or "").strip().lower()
+    if d == "forward":
+        return {"speed": 0.5, "angle": 0.0, "duration_s": duration_s, "mode": "lane_follow_placeholder"}
+    if d == "backward":
+        return {"speed": -0.4, "angle": 0.0, "duration_s": duration_s, "mode": "lane_follow_placeholder"}
+    if d == "left":
+        return {"speed": 0.3, "angle": -0.6, "duration_s": duration_s, "mode": "lane_follow_placeholder"}
+    if d == "right":
+        return {"speed": 0.3, "angle": 0.6, "duration_s": duration_s, "mode": "lane_follow_placeholder"}
+    return None
+
+
+def _has_wake_word(text: str, wake_word: str = "autocar") -> bool:
+    if not text:
+        return False
+    return wake_word.lower() in text.lower()
+
+
+def _strip_wake_word(text: str, wake_word: str = "autocar") -> str:
+    """Remove common prefixes + wake word for cleaner parsing."""
+    if not text:
+        return ""
+    # e.g. "hey autocar, go forward" -> "go forward"
+    pattern = rf"(hey|hi|okay|ok)?\s*{re.escape(wake_word)}\W*"
+    return re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+
+def _parse_duration_seconds(text: str, default_s: float = 5.0, max_s: float = 10.0) -> float:
+    """Parse simple durations like 'for 3 seconds' / 'for 2 sec'."""
+    if not text:
+        return default_s
+    m = re.search(r"\bfor\s+(\d+(?:\.\d+)?)\s*(seconds|second|secs|sec|s)\b", text, flags=re.IGNORECASE)
+    if not m:
+        return default_s
+    try:
+        val = float(m.group(1))
+    except Exception:
+        return default_s
+    val = max(0.5, min(val, max_s))
+    return val
+
+
+def _extract_music_query(transcript: str | None, response_text: str | None) -> str | None:
+    # 1) LLM function-call style: [[PLAY: ...]]
+    if isinstance(response_text, str):
+        m = re.search(r"\[\[PLAY:\s*(.*?)\]\]", response_text, flags=re.IGNORECASE)
+        if m:
+            q = m.group(1).strip()
+            return q or None
+
+    # 2) Direct transcript forms
+    if isinstance(transcript, str):
+        t = transcript.strip()
+        low = t.lower()
+        if low.startswith("play "):
+            return t[5:].strip() or None
+        if low.startswith("spotify "):
+            return t[8:].strip() or None
+    return None
+
+
+def parse_ai_intent(ai_payload: dict) -> dict:
+    """Parse a safe, discrete intent from an AI server payload.
+
+    Expected keys (best-effort):
+      - transcript / input / text
+      - response
+    """
+    transcript = ai_payload.get("transcript")
+    # ai_server.py currently returns this key for /process/audio
+    if not isinstance(transcript, str) or not transcript.strip():
+        transcript = ai_payload.get("transcription")
+    if not isinstance(transcript, str) or not transcript.strip():
+        transcript = ai_payload.get("input")
+    if not isinstance(transcript, str) or not transcript.strip():
+        transcript = ai_payload.get("text")
+    if not isinstance(transcript, str):
+        transcript = ""
+
+    response_text = ai_payload.get("response")
+    if not isinstance(response_text, str):
+        response_text = ""
+
+    # 0) Prefer strict [[INTENT: ...]] line emitted by the LLM
+    intent_line = _extract_intent_line(response_text)
+    if intent_line:
+        intent_name, intent_args = _parse_intent_kv(intent_line)
+
+        if intent_name in {"none", ""}:
+            return {
+                "ok": False,
+                "reason": "intent_none",
+                "transcript": transcript,
+                "clean_command": "",
+                "intent": None,
+                "args": {},
+                "response": response_text,
+            }
+
+        if intent_name == "play_music":
+            q = intent_args.get("query")
+            if not isinstance(q, str) or not q.strip():
+                q = _extract_music_query(transcript, response_text)
+            if isinstance(q, str) and q.strip():
+                return {
+                    "ok": True,
+                    "reason": "intent_line_play_music",
+                    "transcript": transcript,
+                    "clean_command": transcript,
+                    "intent": "play_music",
+                    "args": {"query": q.strip()},
+                    "response": response_text,
+                }
+            return {
+                "ok": False,
+                "reason": "intent_line_missing_query",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": None,
+                "args": {},
+                "response": response_text,
+            }
+
+        if intent_name == "timed_drive":
+            direction = intent_args.get("direction", "")
+            try:
+                duration_s = float(intent_args.get("duration_s", "5"))
+            except Exception:
+                duration_s = 5.0
+            duration_s = max(0.5, min(duration_s, 10.0))
+            td = _intent_to_timed_drive(direction, duration_s)
+            if td:
+                return {
+                    "ok": True,
+                    "reason": "intent_line_timed_drive",
+                    "transcript": transcript,
+                    "clean_command": transcript,
+                    "intent": "timed_drive",
+                    "args": td,
+                    "response": response_text,
+                }
+            return {
+                "ok": False,
+                "reason": "intent_line_bad_direction",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": None,
+                "args": {"direction": direction, "duration_s": duration_s},
+                "response": response_text,
+            }
+
+        if intent_name == "stop":
+            return {
+                "ok": True,
+                "reason": "intent_line_stop",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": "stop",
+                "args": {},
+                "response": response_text,
+            }
+
+        if intent_name == "emergency_stop":
+            return {
+                "ok": True,
+                "reason": "intent_line_emergency_stop",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": "emergency_stop",
+                "args": {},
+                "response": response_text,
+            }
+
+        if intent_name == "auto_route_start":
+            dest = intent_args.get("destination")
+            route_type = (intent_args.get("route_type") or "fastest").strip().lower()
+            try:
+                max_speed = float(intent_args.get("max_speed", 35))
+            except Exception:
+                max_speed = 35.0
+
+            if not isinstance(dest, str) or not dest.strip():
+                return {
+                    "ok": False,
+                    "reason": "intent_line_missing_destination",
+                    "transcript": transcript,
+                    "clean_command": transcript,
+                    "intent": None,
+                    "args": {},
+                    "response": response_text,
+                }
+
+            return {
+                "ok": True,
+                "reason": "intent_line_auto_route_start",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": "auto_route_start",
+                "args": {
+                    "destination": dest.strip(),
+                    "route_type": route_type or "fastest",
+                    "max_speed": max_speed,
+                },
+                "response": response_text,
+            }
+
+        if intent_name == "auto_route_stop":
+            reason = intent_args.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                reason = "user_request"
+            return {
+                "ok": True,
+                "reason": "intent_line_auto_route_stop",
+                "transcript": transcript,
+                "clean_command": transcript,
+                "intent": "auto_route_stop",
+                "args": {"reason": reason},
+                "response": response_text,
+            }
+
+        return {
+            "ok": False,
+            "reason": f"intent_line_unrecognized:{intent_name}",
+            "transcript": transcript,
+            "clean_command": transcript,
+            "intent": None,
+            "args": intent_args,
+            "response": response_text,
+        }
+
+    # Wake-word gate (legacy heuristic). Accept either wake word.
+    if transcript and not (_has_wake_word(transcript, "autocar") or _has_wake_word(transcript, "autodrive")):
+        return {
+            "ok": False,
+            "reason": "missing_wake_word",
+            "transcript": transcript,
+            "clean_command": "",
+            "intent": None,
+            "args": {},
+            "response": response_text,
+        }
+
+    clean = _strip_wake_word(transcript, "autocar")
+    if clean == transcript:
+        clean = _strip_wake_word(transcript, "autodrive")
+    if not clean:
+        return {
+            "ok": False,
+            "reason": "empty_command",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": None,
+            "args": {},
+            "response": response_text,
+        }
+
+    low = clean.lower()
+
+    # Music intent
+    music_query = _extract_music_query(clean, response_text)
+    if music_query:
+        return {
+            "ok": True,
+            "reason": "play_music",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "play_music",
+            "args": {"query": music_query},
+            "response": response_text,
+        }
+
+    # Timed motion placeholders (bounded). This will later be replaced with lane-follower.
+    duration_s = _parse_duration_seconds(clean, default_s=5.0, max_s=10.0)
+    if any(p in low for p in ["go forward", "forward", "go ahead", "move forward"]):
+        return {
+            "ok": True,
+            "reason": "timed_forward",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "timed_drive",
+            "args": {"speed": 0.5, "angle": 0.0, "duration_s": duration_s, "mode": "lane_follow_placeholder"},
+            "response": response_text,
+        }
+    if any(p in low for p in ["go backward", "backward", "reverse", "move back"]):
+        return {
+            "ok": True,
+            "reason": "timed_backward",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "timed_drive",
+            "args": {"speed": -0.4, "angle": 0.0, "duration_s": duration_s, "mode": "lane_follow_placeholder"},
+            "response": response_text,
+        }
+    if any(p in low for p in ["turn left", "go left", "left"]):
+        return {
+            "ok": True,
+            "reason": "timed_left",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "timed_drive",
+            "args": {"speed": 0.3, "angle": -0.6, "duration_s": duration_s, "mode": "lane_follow_placeholder"},
+            "response": response_text,
+        }
+    if any(p in low for p in ["turn right", "go right", "right"]):
+        return {
+            "ok": True,
+            "reason": "timed_right",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "timed_drive",
+            "args": {"speed": 0.3, "angle": 0.6, "duration_s": duration_s, "mode": "lane_follow_placeholder"},
+            "response": response_text,
+        }
+
+    # Stop (non-emergency) – stop manual motion or route
+    if low in {"stop", "halt", "cancel"} or "stop" in low:
+        return {
+            "ok": True,
+            "reason": "stop",
+            "transcript": transcript,
+            "clean_command": clean,
+            "intent": "stop",
+            "args": {},
+            "response": response_text,
+        }
+
+    return {
+        "ok": False,
+        "reason": "unrecognized_intent",
+        "transcript": transcript,
+        "clean_command": clean,
+        "intent": None,
+        "args": {},
+        "response": response_text,
+    }
 
 
 def generate_mock_route(destination: str):
@@ -329,19 +702,15 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
         }
         await ws.send(json.dumps(handshake))
 
-        # start receiver task
-        # --- Microphone streaming state ---
-        mic_streaming = False
-        mic_task = None
-
         # Siri-style: record audio to buffer, send on close
         import sounddevice as sd
         import numpy as np
-        import requests
         import tempfile
         samplerate = 16000
         audio_buffer = []
         recording_stream = None
+
+        voice_drive_task = None
 
         def audio_callback(indata, frames, time_info, status):
             audio_buffer.append(indata.copy())
@@ -355,6 +724,7 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
 
         async def stop_and_send_recording():
             nonlocal recording_stream, audio_buffer
+            nonlocal voice_drive_task
             print("[MIC] Microphone recording stopped, sending to AI server")
             if recording_stream:
                 recording_stream.stop()
@@ -378,6 +748,187 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                         resp = requests.post(url, files=files, timeout=15)
                     if resp.ok:
                         data = resp.json()
+
+                        # Post-process AI output (wake-word + intent parsing)
+                        try:
+                            intent_obj = parse_ai_intent(data if isinstance(data, dict) else {})
+                            print(f"[AI][POST] intent={intent_obj.get('intent')} ok={intent_obj.get('ok')} reason={intent_obj.get('reason')} cmd=\"{intent_obj.get('clean_command','')}\"")
+                            intent_telemetry = {
+                                "role": "pi",
+                                "device_id": device_id,
+                                "action": "telemetry",
+                                "type": "voice_intent",
+                                "payload": intent_obj,
+                                "ts": time.time(),
+                            }
+                            await ws.send(json.dumps(intent_telemetry))
+
+                            # Execute safe discrete actions locally (sim placeholders)
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "play_music" and spotify:
+                                q = (intent_obj.get("args") or {}).get("query")
+                                if isinstance(q, str) and q.strip():
+                                    try:
+                                        print(f"[CLIENT][SPOTIFY] Triggering playback for query: {q}")
+                                        play_result = spotify.play_music(q)
+                                        music_msg = {
+                                            "role": "pi",
+                                            "device_id": device_id,
+                                            "action": "telemetry",
+                                            "type": "music_play",
+                                            "payload": {"query": q, "status": play_result, "source": "voice"},
+                                            "ts": time.time(),
+                                        }
+                                        await ws.send(json.dumps(music_msg))
+                                    except Exception as e:
+                                        err_msg = {
+                                            "role": "pi",
+                                            "device_id": device_id,
+                                            "action": "telemetry",
+                                            "type": "music_play",
+                                            "payload": {"query": q, "error": str(e), "source": "voice"},
+                                            "ts": time.time(),
+                                        }
+                                        await ws.send(json.dumps(err_msg))
+
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "stop":
+                                # Non-emergency stop: cancel timed drive and stop routes
+                                if voice_drive_task and not voice_drive_task.done():
+                                    voice_drive_task.cancel()
+                                stop_autonomous_route("voice_stop")
+                                _grid_route_active = False
+                                apply_manual_control(0.0, 0.0)
+                                stop_msg = {
+                                    "role": "pi",
+                                    "device_id": device_id,
+                                    "action": "telemetry",
+                                    "type": "voice_drive_status",
+                                    "payload": {"status": "stopped", "reason": "voice_stop"},
+                                    "ts": time.time(),
+                                }
+                                await ws.send(json.dumps(stop_msg))
+
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "auto_route_start":
+                                args = intent_obj.get("args") or {}
+                                destination = args.get("destination", "Unknown")
+                                settings = {
+                                    "route_type": args.get("route_type", "fastest"),
+                                    "max_speed": args.get("max_speed", 35),
+                                    "following_distance": "safe",
+                                }
+                                if not _emergency_active:
+                                    start_autonomous_route(str(destination), settings)
+                                    ack = {
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "route_ack",
+                                        "payload": {"status": "route_started", "destination": destination, "source": "voice"},
+                                        "ts": time.time(),
+                                    }
+                                else:
+                                    ack = {
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "route_ack",
+                                        "payload": {"status": "blocked_emergency", "destination": destination, "source": "voice"},
+                                        "ts": time.time(),
+                                    }
+                                await ws.send(json.dumps(ack))
+
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "auto_route_stop":
+                                args = intent_obj.get("args") or {}
+                                reason = args.get("reason", "user_request")
+                                stop_autonomous_route(str(reason))
+                                _grid_route_active = False
+
+                                ack = {
+                                    "role": "pi",
+                                    "device_id": device_id,
+                                    "action": "telemetry",
+                                    "type": "route_ack",
+                                    "payload": {"status": "route_stopped", "reason": reason, "source": "voice"},
+                                    "ts": time.time(),
+                                }
+                                await ws.send(json.dumps(ack))
+
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "emergency_stop":
+                                emergency_stop()
+                                await ws.send(json.dumps({
+                                    "role": "pi",
+                                    "device_id": device_id,
+                                    "action": "telemetry",
+                                    "type": "emergency_ack",
+                                    "payload": {
+                                        "status": "stopped",
+                                        "motors_disabled": True,
+                                        "emergency_timestamp": _last_emergency_time,
+                                        "device_id": device_id,
+                                        "route_stopped": True,
+                                        "reason": "voice_emergency_stop",
+                                    },
+                                    "ts": time.time(),
+                                }))
+
+                            if intent_obj.get("ok") and intent_obj.get("intent") == "timed_drive":
+                                args = intent_obj.get("args") or {}
+                                speed = float(args.get("speed", 0.0))
+                                angle = float(args.get("angle", 0.0))
+                                duration_s = float(args.get("duration_s", 5.0))
+
+                                async def _timed_drive():
+                                    # For now this is a placeholder until LaneFollower is bridged in.
+                                    if _emergency_active:
+                                        await ws.send(json.dumps({
+                                            "role": "pi",
+                                            "device_id": device_id,
+                                            "action": "telemetry",
+                                            "type": "voice_drive_status",
+                                            "payload": {"status": "blocked", "reason": "emergency_active"},
+                                            "ts": time.time(),
+                                        }))
+                                        return
+                                    if _route_active or _grid_route_active:
+                                        await ws.send(json.dumps({
+                                            "role": "pi",
+                                            "device_id": device_id,
+                                            "action": "telemetry",
+                                            "type": "voice_drive_status",
+                                            "payload": {"status": "blocked", "reason": "autonomous_active"},
+                                            "ts": time.time(),
+                                        }))
+                                        return
+
+                                    started = apply_manual_control(speed, angle)
+                                    await ws.send(json.dumps({
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "voice_drive_status",
+                                        "payload": {"status": "started" if started else "blocked", "duration_s": duration_s, "speed": speed, "angle": angle, "mode": args.get("mode")},
+                                        "ts": time.time(),
+                                    }))
+                                    if not started:
+                                        return
+                                    try:
+                                        await asyncio.sleep(max(0.1, min(duration_s, 10.0)))
+                                    finally:
+                                        apply_manual_control(0.0, 0.0)
+                                        await ws.send(json.dumps({
+                                            "role": "pi",
+                                            "device_id": device_id,
+                                            "action": "telemetry",
+                                            "type": "voice_drive_status",
+                                            "payload": {"status": "stopped", "reason": "timeout"},
+                                            "ts": time.time(),
+                                        }))
+
+                                if voice_drive_task and not voice_drive_task.done():
+                                    voice_drive_task.cancel()
+                                voice_drive_task = asyncio.create_task(_timed_drive())
+                        except Exception as e:
+                            print(f"[AI][POST][ERROR] {e}")
+
                         msg = {
                             "role": "pi",
                             "device_id": device_id,
@@ -397,7 +948,6 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
 
 
         async def receiver():
-            nonlocal mic_streaming, mic_task
             # DECLARE ALL GLOBALS USED/MODIFIED IN THIS FUNCTION HERE
             global _grid_route_active, _grid_waypoints, _grid_current_index, _grid_start_time
             global _current_speed, _current_angle, _emergency_active, _last_emergency_time
@@ -493,6 +1043,7 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
 
                         # Call AI server for processing
                         result_payload = {"input": qc_text, "response": None, "error": None}
+                        intent_obj = None
                         try:
                             url = f"{AI_SERVER_URL.rstrip('/')}/process/text"
                             r = requests.post(url, json={"text": qc_text}, timeout=10)
@@ -503,6 +1054,23 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                             if data.get("input"):
                                 result_payload["input"] = data["input"]
                             print(f"[CLIENT] AI response: {result_payload['response']}")
+
+                            # Post-process AI output (wake-word + intent parsing)
+                            if isinstance(data, dict):
+                                try:
+                                    intent_obj = parse_ai_intent(data)
+                                    print(f"[AI][POST] intent={intent_obj.get('intent')} ok={intent_obj.get('ok')} reason={intent_obj.get('reason')} cmd=\"{intent_obj.get('clean_command','')}\"")
+                                    intent_telemetry = {
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "voice_intent",
+                                        "payload": intent_obj,
+                                        "ts": time.time(),
+                                    }
+                                    await ws.send(json.dumps(intent_telemetry))
+                                except Exception as e:
+                                    print(f"[AI][POST][ERROR] {e}")
                         except Exception as e:
                             result_payload["error"] = str(e)
                             print(f"[CLIENT][ERROR] AI server call failed: {e}")
@@ -518,43 +1086,84 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                         }
                         await ws.send(json.dumps(result_msg))
 
-                        # Optional: inline music trigger if command or AI response indicates
-                        music_query = None
-                        if qc_text.lower().startswith("play "):
-                            music_query = qc_text[5:].strip()
-                        elif qc_text.lower().startswith("spotify "):
-                            music_query = qc_text[8:].strip()
-                        elif result_payload.get("response") and isinstance(result_payload.get("response"), str):
-                            resp_txt = result_payload["response"].lower()
-                            # crude pattern: response begins with play_music: <query>
-                            if resp_txt.startswith("play_music:"):
-                                music_query = result_payload["response"].split(":",1)[1].strip()
+                        # Optional: trigger Spotify only via parsed intent (keeps one command format)
+                        if (
+                            isinstance(intent_obj, dict)
+                            and intent_obj.get("ok")
+                            and intent_obj.get("intent") == "play_music"
+                            and spotify
+                        ):
+                            q = (intent_obj.get("args") or {}).get("query")
+                            if isinstance(q, str) and q.strip():
+                                try:
+                                    print(f"[CLIENT][SPOTIFY] Triggering playback for query: {q}")
+                                    play_result = spotify.play_music(q)
+                                    music_msg = {
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "music_play",
+                                        "payload": {"query": q, "status": play_result, "source": "quick_command"},
+                                        "ts": time.time(),
+                                    }
+                                    await ws.send(json.dumps(music_msg))
+                                except Exception as e:
+                                    print(f"[CLIENT][SPOTIFY][ERROR] {e}")
+                                    err_msg = {
+                                        "role": "pi",
+                                        "device_id": device_id,
+                                        "action": "telemetry",
+                                        "type": "music_play",
+                                        "payload": {"query": q, "error": str(e), "source": "quick_command"},
+                                        "ts": time.time(),
+                                    }
+                                    await ws.send(json.dumps(err_msg))
 
-                        if music_query and spotify:
-                            try:
-                                print(f"[CLIENT][SPOTIFY] Triggering playback for query: {music_query}")
-                                play_result = spotify.play_music(music_query)
-                                # send a small telemetry note
-                                music_msg = {
+                        # Optional: trigger navigation locally via parsed intent
+                        if isinstance(intent_obj, dict) and intent_obj.get("ok") and intent_obj.get("intent") == "auto_route_start":
+                            args = intent_obj.get("args") or {}
+                            destination = args.get("destination", "Unknown")
+                            settings = {
+                                "route_type": args.get("route_type", "fastest"),
+                                "max_speed": args.get("max_speed", 35),
+                                "following_distance": "safe",
+                            }
+                            if not _emergency_active:
+                                start_autonomous_route(str(destination), settings)
+                                ack = {
                                     "role": "pi",
                                     "device_id": device_id,
                                     "action": "telemetry",
-                                    "type": "music_play",
-                                    "payload": {"query": music_query, "status": play_result},
+                                    "type": "route_ack",
+                                    "payload": {"status": "route_started", "destination": destination, "source": "quick_command"},
                                     "ts": time.time(),
                                 }
-                                await ws.send(json.dumps(music_msg))
-                            except Exception as e:
-                                print(f"[CLIENT][SPOTIFY][ERROR] {e}")
-                                err_msg = {
+                            else:
+                                ack = {
                                     "role": "pi",
                                     "device_id": device_id,
                                     "action": "telemetry",
-                                    "type": "music_play",
-                                    "payload": {"query": music_query, "error": str(e)},
+                                    "type": "route_ack",
+                                    "payload": {"status": "blocked_emergency", "destination": destination, "source": "quick_command"},
                                     "ts": time.time(),
                                 }
-                                await ws.send(json.dumps(err_msg))
+                            await ws.send(json.dumps(ack))
+
+                        if isinstance(intent_obj, dict) and intent_obj.get("ok") and intent_obj.get("intent") == "auto_route_stop":
+                            args = intent_obj.get("args") or {}
+                            reason = args.get("reason", "user_request")
+                            stop_autonomous_route(str(reason))
+                            _grid_route_active = False
+
+                            ack = {
+                                "role": "pi",
+                                "device_id": device_id,
+                                "action": "telemetry",
+                                "type": "route_ack",
+                                "payload": {"status": "route_stopped", "reason": reason, "source": "quick_command"},
+                                "ts": time.time(),
+                            }
+                            await ws.send(json.dumps(ack))
                     
                     elif act == "control" and ptype == "auto_route_start":
                         destination = payload.get("destination", "Unknown")
