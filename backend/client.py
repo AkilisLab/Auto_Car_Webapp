@@ -1248,16 +1248,21 @@ async def pi_client(uri: str, device_id: str = "pi-01", fps: float = 5.0, cam_in
                     elif act == "control" and ptype == "execute_route":
                         # New: receive grid waypoints from server A* planner
                         wps = payload.get("waypoints") or []
+                        actions = payload.get("actions") or []
                         goal_name = payload.get("goal_name", "Unknown")
 
-                        # DEBUG LOG: raw waypoints from server
+                        # DEBUG LOG: raw waypoints and actions from server
                         try:
                             print("[ROUTE][DEBUG] Raw waypoints payload from server:")
                             print(f"  type: {type(wps)}, len: {len(wps)}")
                             for i, wp in enumerate(wps):
                                 print(f"    #{i}: {wp}")
+                            print("[ROUTE][DEBUG] Actions list:")
+                            print(f"  type: {type(actions)}, len: {len(actions)}")
+                            for i, action in enumerate(actions):
+                                print(f"    #{i}: {action}")
                         except Exception as e:
-                            print(f"[ROUTE][DEBUG] Error while printing waypoints: {e}")
+                            print(f"[ROUTE][DEBUG] Error while printing waypoints/actions: {e}")
 
                         if not wps:
                             print("[ROUTE] Received execute_route with empty waypoints")

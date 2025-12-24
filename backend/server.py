@@ -7,8 +7,16 @@ import os
 from typing import Dict, Any
 from urllib.parse import urlparse, urlunparse
 
-# Import your planner
+
+# Import planner utilities for waypoints and actions
 import Astar_planner
+from Astar_planner import (
+    plan_with_headings,
+    astar_with_intersections,
+    intersection_actions,
+    read_grid,
+    waypoints_with_headings,
+)
 
 
 import threading
@@ -618,10 +626,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Ensure inputs are integers for the planner
                             start_node = (int(start_pos[0]), int(start_pos[1]))
                             goal_node = (int(goal_pos[0]), int(goal_pos[1]))
-                            
+
                             print(f"Planning route for {target_device}: {start_node} -> {goal_node}")
-                            waypoints = Astar_planner.plan_with_headings(NAV_GRID, start_node, goal_node)
-                            
+                            # Get path and intersection indices
+                            path, intersection_indices = astar_with_intersections(NAV_GRID, start_node, goal_node)
+                            waypoints = waypoints_with_headings(path)
+                            actions = intersection_actions(waypoints, intersection_indices)
+
                             if not waypoints:
                                 await manager.send_json({"error": "No path found (blocked or invalid)"}, websocket)
                                 continue
@@ -629,6 +640,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             print(f"[SERVER] A* path length: {len(waypoints)}")
                             print(f"[SERVER] First waypoint: {waypoints[0] if waypoints else None}")
                             print(f"[SERVER] Last  waypoint: {waypoints[-1] if waypoints else None}")
+                            print(f"[SERVER] Actions: {actions}")
 
                             # 4. Send Instructions to Pi (Execute)
                             route_command = {
@@ -637,6 +649,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "type": "execute_route",
                                 "payload": {
                                     "waypoints": waypoints,
+                                    "actions": actions,
                                     "goal_name": str(dest_raw)
                                 }
                             }
@@ -648,6 +661,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "target": target_device,
                                 "payload": {
                                     "waypoints": waypoints,
+                                    "actions": actions,
                                     "start": start_node,
                                     "goal": goal_node
                                 }
